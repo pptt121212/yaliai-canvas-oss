@@ -1,0 +1,27 @@
+{
+  "name": "@yali/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "pnpm --filter \"@yali/web^...\" build && vite build",
+    "check": "pnpm --filter \"@yali/web^...\" build && tsc --noEmit"
+  },
+  "dependencies": {
+    "@xyflow/react": "^12.8.6",
+    "lucide-react": "^0.539.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "@yali/canvas-core": "workspace:*",
+    "@yali/workflow-schema": "workspace:*",
+    "@yali/ui-canvas": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.3"
+  }
+}

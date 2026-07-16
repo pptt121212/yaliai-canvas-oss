@@ -1,0 +1,29 @@
+{
+  "name": "@yali/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -b tsconfig.json",
+    "check": "tsc -b tsconfig.json",
+    "start": "node dist/src/server.js",
+    "bootstrap:postgres": "node dist/src/scripts/bootstrapPostgres.js",
+    "rollup:operational": "node dist/src/scripts/buildOperationalRollups.js"
+  },
+  "dependencies": {
+    "@fastify/multipart": "^10.1.0",
+    "@yali/billing-core": "workspace:*",
+    "@yali/provider-core": "workspace:*",
+    "@yali/workflow-schema": "workspace:*",
+    "fastify": "^5.6.0",
+    "pg": "^8.16.3",
+    "redis": "^5.8.2",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}

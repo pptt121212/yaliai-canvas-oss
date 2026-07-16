@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "composite": true,
+    "types": ["node"]
+  },
+  "include": ["src"],
+  "references": [
+    { "path": "../../packages/workflow-schema" },
+    { "path": "../../packages/provider-core" },
+    { "path": "../../packages/billing-core" }
+  ]
+}

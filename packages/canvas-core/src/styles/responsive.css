@@ -1,0 +1,69 @@
+@media (max-width: 980px) {
+  .floating-toolbar {
+    right: 12px;
+    left: 12px;
+    overflow-x: auto;
+  }
+
+  .canvas-help-strip {
+    display: none;
+  }
+
+  .floating-inspector {
+    right: 12px;
+    left: 12px;
+    top: auto;
+    bottom: 12px;
+    width: auto;
+    max-height: 230px;
+  }
+
+  .edge-inspector {
+    right: 12px;
+    left: 12px;
+    top: auto;
+    bottom: 12px;
+    width: auto;
+  }
+
+  .run-log {
+    display: none;
+  }
+
+  .react-flow__minimap {
+    display: none;
+  }
+
+  .reference-shell,
+  .lightbox-shell {
+    width: calc(100vw - 20px);
+    height: calc(100vh - 20px);
+  }
+
+  .local-reference-editor {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .local-reference-panel {
+    grid-template-rows: auto auto auto auto;
+    border-top: 1px solid rgba(148, 163, 184, 0.24);
+    border-left: 0;
+  }
+
+  .local-reference-prompt textarea {
+    min-height: 96px;
+  }
+
+  .local-reference-tools {
+    grid-template-columns: 1fr 1fr 38px 52px 38px;
+  }
+
+  .reference-head span {
+    white-space: normal;
+  }
+
+  .editor-toolbar {
+    flex-wrap: nowrap;
+  }
+}

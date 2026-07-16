@@ -1,0 +1,24 @@
+{
+  "name": "@yali/canvas-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./styles.css": "./src/styles.css"
+  },
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "scripts": {
+    "build": "echo \"canvas-core is consumed as source, no build step\"",
+    "check": "node ../../scripts/check-canvas-utf8.mjs"
+  },
+  "dependencies": {
+    "@imgly/background-removal": "^1.7.0",
+    "@xyflow/react": "^12.8.6",
+    "jszip": "^3.10.1",
+    "lucide-react": "^0.539.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  }
+}

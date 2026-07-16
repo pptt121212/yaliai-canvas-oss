@@ -1,0 +1,17 @@
+node_modules
+dist
+*.tsbuildinfo
+.turbo
+.vite
+.idea
+.vscode
+coverage
+.env
+.env.*
+!.env.example
+!**/.env.example
+api-run.log
+api-run.err
+apps/api/data/
+.tmp-admin-test/
+.tmp-api-data/
