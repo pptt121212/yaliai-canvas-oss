@@ -2530,8 +2530,23 @@ async function executeUpstreamImageRequest(input: {
   } | null = null;
   let lastError: unknown = null;
   const providerAttempts: RoutedProviderAttemptTrace[] = [];
+  const retrySoleProvider = canRetrySoleProvider(preview.mode, preview.candidates.length);
+  const executionCandidates = retrySoleProvider
+    ? Array.from({ length: maxSoleProviderRetries + 1 }, () => preview.candidates[0]!)
+    : preview.candidates;
 
-  for (const candidate of preview.candidates) {
+  for (let candidateIndex = 0; candidateIndex < executionCandidates.length; candidateIndex += 1) {
+    const candidate = executionCandidates[candidateIndex]!;
+    const sameProviderRetryAttempt = retrySoleProvider ? candidateIndex : undefined;
+    const sameProviderRetryLimit = retrySoleProvider ? maxSoleProviderRetries : undefined;
+    if (sameProviderRetryAttempt && sameProviderRetryAttempt > 0) {
+      await waitBeforeSoleProviderRetry(sameProviderRetryAttempt);
+    }
+    const shouldRetryCurrentSoleProvider = (failure: { category: string; shouldFailover: boolean }) => (
+      retrySoleProvider
+      && candidateIndex < executionCandidates.length - 1
+      && isSameProviderRetryableFailure(failure)
+    );
     const attemptStartedAt = Date.now();
     const requestTimeoutMs = resolveProviderRequestTimeoutMs(candidate.provider);
     let providerConcurrencyKey: string | null = null;
@@ -2551,6 +2566,8 @@ async function executeUpstreamImageRequest(input: {
           statusCode: 429,
           failureCategory: failure.category,
           shouldFailover: failure.shouldFailover,
+          sameProviderRetryAttempt,
+          sameProviderRetryLimit,
         }));
         lastResult = {
           resolved: {
@@ -2583,7 +2600,9 @@ async function executeUpstreamImageRequest(input: {
             attempts: providerAttempts,
           }),
         };
-        if (shouldStopAfterFirstProviderAttempt(preview.mode)) {
+        // This 429 is emitted by our own concurrency guard before an upstream
+        // request exists. Retrying the same saturated provider cannot help.
+        if (retrySoleProvider || shouldStopAfterFirstProviderAttempt(preview.mode)) {
           return lastResult;
         }
         continue;
@@ -2626,6 +2645,8 @@ async function executeUpstreamImageRequest(input: {
           startedAt: attemptStartedAt,
           status: 'success',
           statusCode: response.statusCode,
+          sameProviderRetryAttempt,
+          sameProviderRetryLimit,
         }));
         lastResult.routing = buildRoutingSummary({
           mode: preview.mode,
@@ -2651,6 +2672,8 @@ async function executeUpstreamImageRequest(input: {
           statusCode: 502,
           failureCategory: semanticFailure.category,
           shouldFailover: semanticFailure.shouldFailover,
+          sameProviderRetryAttempt,
+          sameProviderRetryLimit,
         }));
         await providerRegistry.reportAttempt({
           providerId: candidate.provider.providerId,
@@ -2683,6 +2706,9 @@ async function executeUpstreamImageRequest(input: {
           activeCandidate: candidate,
           attempts: providerAttempts,
         });
+        if (shouldRetryCurrentSoleProvider(semanticFailure)) {
+          continue;
+        }
         if (shouldStopAfterFirstProviderAttempt(preview.mode)) {
           return lastResult;
         }
@@ -2701,6 +2727,8 @@ async function executeUpstreamImageRequest(input: {
         statusCode: response.statusCode,
         failureCategory: failure.category,
         shouldFailover: failure.shouldFailover,
+        sameProviderRetryAttempt,
+        sameProviderRetryLimit,
       }));
       await providerRegistry.reportAttempt({
         providerId: candidate.provider.providerId,
@@ -2723,6 +2751,9 @@ async function executeUpstreamImageRequest(input: {
         activeCandidate: candidate,
         attempts: providerAttempts,
       });
+      if (shouldRetryCurrentSoleProvider(failure)) {
+        continue;
+      }
       if (!failure.shouldFailover || shouldStopAfterFirstProviderAttempt(preview.mode)) {
         return lastResult;
       }
@@ -2738,6 +2769,8 @@ async function executeUpstreamImageRequest(input: {
         statusCode: 599,
         failureCategory: failure.category,
         shouldFailover: failure.shouldFailover,
+        sameProviderRetryAttempt,
+        sameProviderRetryLimit,
       }));
       await providerRegistry.reportAttempt({
         providerId: candidate.provider.providerId,
@@ -2781,6 +2814,9 @@ async function executeUpstreamImageRequest(input: {
           attempts: providerAttempts,
         }),
       };
+      if (shouldRetryCurrentSoleProvider(failure)) {
+        continue;
+      }
       if (!failure.shouldFailover || shouldStopAfterFirstProviderAttempt(preview.mode)) {
         return lastResult;
       }
@@ -3569,6 +3605,8 @@ type RoutedProviderAttemptTrace = {
   completed_at: string;
   reasons?: string[];
   score?: number;
+  same_provider_retry_attempt?: number;
+  same_provider_retry_limit?: number;
 };
 
 type RoutedImageExecutionPreview = {
@@ -3615,6 +3653,35 @@ function resolveEffectiveImageRoutingMode(input: {
 
 function shouldStopAfterFirstProviderAttempt(mode: EffectiveRoutingMode) {
   return mode === 'smart_priority' || mode === 'fixed_provider';
+}
+
+const maxSoleProviderRetries = 3;
+
+function canRetrySoleProvider(mode: EffectiveRoutingMode, candidateCount: number) {
+  return candidateCount === 1 && (
+    mode === 'smart_failover'
+    || mode === 'smart_priority'
+    || mode === 'fixed_provider'
+  );
+}
+
+function isSameProviderRetryableFailure(failure: { category: string; shouldFailover: boolean }) {
+  if (!failure.shouldFailover) {
+    return false;
+  }
+  return [
+    'retryable_transport',
+    'retryable_timeout',
+    'retryable_gateway',
+    'retryable_overloaded',
+    'retryable_rate_limit',
+    'retryable_status',
+  ].includes(failure.category);
+}
+
+function waitBeforeSoleProviderRetry(retryAttempt: number) {
+  const delayMs = Math.min(1_000, 250 * (2 ** Math.max(0, retryAttempt - 1)));
+  return new Promise<void>((resolve) => setTimeout(resolve, delayMs));
 }
 
 function buildApiKeyConcurrencyKey(accessContext: RequestAccessContext) {
@@ -4090,6 +4157,8 @@ function buildProviderAttemptTrace(input: {
   statusCode?: number;
   failureCategory?: string;
   shouldFailover?: boolean;
+  sameProviderRetryAttempt?: number;
+  sameProviderRetryLimit?: number;
 }) {
   const completedAt = Date.now();
   return {
@@ -4106,6 +4175,8 @@ function buildProviderAttemptTrace(input: {
     completed_at: formatAttemptTime(completedAt),
     reasons: input.candidate.reasons,
     score: input.candidate.score,
+    same_provider_retry_attempt: input.sameProviderRetryAttempt,
+    same_provider_retry_limit: input.sameProviderRetryLimit,
   } satisfies RoutedProviderAttemptTrace;
 }
 

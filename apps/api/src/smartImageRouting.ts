@@ -906,7 +906,18 @@ export function classifyUpstreamFailure(input: {
       cooldownMs: 45_000,
     };
   }
-  if (statusCode === 429) {
+  const upstreamQuotaSignals = [
+    'insufficient_quota',
+    'insufficient_user_quota',
+    'quota exceeded',
+    'billing',
+    'payment required',
+    'balance',
+    'credit',
+    '订阅额度不足',
+    '额度不足',
+  ];
+  if (statusCode === 429 && !upstreamQuotaSignals.some((signal) => haystack.includes(signal))) {
     return {
       category: 'retryable_rate_limit',
       shouldFailover: true,
@@ -916,15 +927,7 @@ export function classifyUpstreamFailure(input: {
   // These responses describe the selected upstream account, not the tenant's
   // request. Fuse that upstream and continue through smart_failover candidates.
   if (
-    haystack.includes('insufficient_quota')
-    || haystack.includes('insufficient_user_quota')
-    || haystack.includes('quota exceeded')
-    || haystack.includes('billing')
-    || haystack.includes('payment required')
-    || haystack.includes('balance')
-    || haystack.includes('credit')
-    || haystack.includes('订阅额度不足')
-    || haystack.includes('额度不足')
+    upstreamQuotaSignals.some((signal) => haystack.includes(signal))
   ) {
     return {
       category: 'retryable_upstream_quota',
