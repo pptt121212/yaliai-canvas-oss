@@ -38,11 +38,11 @@ sudo apt update
 sudo apt install -y git curl build-essential nginx postgresql postgresql-contrib redis-server
 ```
 
-Install Node.js 22 and pnpm:
+Install Node.js 22 and the repository-pinned pnpm version:
 
 ```bash
 corepack enable
-corepack prepare pnpm@latest --activate
+corepack prepare pnpm@11.7.0 --activate
 node -v
 pnpm -v
 ```
@@ -60,7 +60,6 @@ Example layout:
 ```text
 /opt/yaliai-canvas-oss/app          # Git checkout
 /opt/yaliai-canvas-oss/data         # runtime data root
-/opt/yaliai-canvas-oss/shared-data  # generated images and temporary media
 ```
 
 Create directories:
@@ -68,7 +67,8 @@ Create directories:
 ```bash
 sudo mkdir -p /opt/yaliai-canvas-oss/app
 sudo mkdir -p /opt/yaliai-canvas-oss/data
-sudo mkdir -p /opt/yaliai-canvas-oss/shared-data/generated-images
+sudo mkdir -p /opt/yaliai-canvas-oss/data/generated-images
+sudo mkdir -p /opt/yaliai-canvas-oss/data/canvas-reference-assets
 sudo chown -R "$USER":"$USER" /opt/yaliai-canvas-oss
 ```
 
@@ -104,12 +104,12 @@ DATABASE_URL="$DATABASE_URL" PG_SCHEMA="$PG_SCHEMA" pnpm --filter @yali/api boot
 
 Recommended application pool setting:
 
-- `PG_POOL_MAX=12` for the default 2 API workers + 1 queue worker.
-- Increase gradually if you increase PM2 instances and PostgreSQL has enough `max_connections`.
+- `PG_POOL_MAX=12` is the default pool size per Node.js process.
+- The default PM2 topology has two API processes plus one Worker, so PostgreSQL must allow roughly three application pools plus admin and maintenance headroom. Increase gradually only after sizing `max_connections` accordingly.
 
 ## 4. Redis
 
-Redis is strongly recommended for production and multi-process mode.
+Redis is required by the supplied PM2 topology: it starts both a multi-process API cluster and a canvas Worker. A single API process without the Worker may omit Redis only for local development.
 
 Start and enable Redis:
 
@@ -162,8 +162,8 @@ export ADMIN_USERNAME=admin
 export ADMIN_PASSWORD='replace-with-a-strong-admin-password'
 export ADMIN_SESSION_SECRET='replace-with-a-long-random-secret'
 export ADMIN_DATA_DIR=/opt/yaliai-canvas-oss/data
-export PROVIDER_DATA_DIR=/opt/yaliai-canvas-oss/data
-export GENERATED_IMAGE_DIR=/opt/yaliai-canvas-oss/shared-data/generated-images
+export GENERATED_IMAGE_ACCEL_REDIRECT_PREFIX='/_generated-images'
+export GENERATED_IMAGE_ACCEL_REDIRECT_TARGET_DIR='/opt/yaliai-canvas-oss/data/generated-images'
 export PUBLIC_API_BASE_URL='https://api.example.com'
 export DEFAULT_TEST_REFERENCE_IMAGE_URL='https://api.example.com/test-assets/reference-test.png'
 ```
@@ -183,6 +183,7 @@ Important runtime tuning variables:
 | `ASYNC_IMAGE_QUEUE_PER_API_KEY_MAX` | `20` | Per-key async queue cap. |
 | `IMAGE_PERSISTENCE_OUTBOX_ENABLED` | `true` | Persist successful image task metadata outside the response hot path. |
 | `OPERATIONAL_ROLLUP_ENABLED` | unset | Set to `false` to hard-disable operational rollup reports. |
+| `GENERATED_IMAGE_ACCEL_REDIRECT_TARGET_DIR` | unset | Enable Nginx internal acceleration when it matches the generated-image directory. |
 
 ## 7. PM2 Process Model
 
@@ -232,7 +233,7 @@ Use `deploy/nginx/example.conf` as the site template and replace:
 
 - `api.example.com`
 - `/opt/yaliai-canvas-oss/app`
-- `/opt/yaliai-canvas-oss/shared-data/generated-images`
+- `/opt/yaliai-canvas-oss/data/generated-images`
 - SSL certificate paths
 
 Install the site:
@@ -353,7 +354,8 @@ pnpm install --frozen-lockfile
 pnpm check
 pnpm -r build
 DATABASE_URL="$DATABASE_URL" PG_SCHEMA="$PG_SCHEMA" pnpm --filter @yali/api bootstrap:postgres
-pm2 reload deploy/api/ecosystem.config.cjs --update-env
+pm2 reload yali-canvas-api --update-env
+pm2 restart yali-canvas-worker --update-env
 sudo nginx -t
 sudo systemctl reload nginx
 ```

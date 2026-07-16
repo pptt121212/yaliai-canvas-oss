@@ -34,7 +34,7 @@ Redis stores shared hot-path runtime state:
 - queue claim locks
 - multi-process coordination state
 
-Redis is strongly recommended for production. It is required when you want multiple API processes to share accurate runtime counters and locks.
+Redis is required for multi-process API deployments and for the canvas Worker. Those modes use Redis for accurate runtime counters, task claims, and locks. A single API process may omit Redis only for local development without the Worker.
 
 ## File Assets
 
@@ -44,16 +44,16 @@ The API still uses configured directories for binary assets that should not be s
 - temporary reference images used by multipart image workflows
 - upstream probe preview images
 
-Configure these paths with:
+Configure the asset root with `ADMIN_DATA_DIR`. The gateway stores generated images in `$ADMIN_DATA_DIR/generated-images` and canvas reference assets in `$ADMIN_DATA_DIR/canvas-reference-assets`.
 
-- `ADMIN_DATA_DIR`
-- `PROVIDER_DATA_DIR`
-- `GENERATED_IMAGE_DIR` when you want generated images in a dedicated directory
+`PROVIDER_DATA_DIR` remains a compatibility setting for legacy local provider storage and is not required in PostgreSQL-backed production mode. `GENERATED_IMAGE_DIR` currently affects the admin disk metric only; it does not change the gateway's generated-image storage path.
 
 The Nginx example uses an internal acceleration path for generated images:
 
 - public URL returned by API: `/v1/generated-images/...`
-- internal Nginx alias: `/_generated-images/...`
+- internal Nginx alias: `/_generated-images/...`, mapped to `$ADMIN_DATA_DIR/generated-images`
+
+To enable this acceleration path, set `GENERATED_IMAGE_ACCEL_REDIRECT_TARGET_DIR` to the same generated-image directory. If it is unset, the API safely falls back to direct Node.js streaming.
 
 Keep these directories outside the Git working tree and make sure the Node process user can read and write them.
 

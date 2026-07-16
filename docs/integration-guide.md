@@ -65,20 +65,23 @@ window.yaliCanvasRuntime = {
   canvasRunStartEndpoint: 'https://your-api.example.com/v1/canvas/workflow-runs',
   canvasRunStatusEndpoint: 'https://your-api.example.com/v1/canvas/workflow-runs',
   canvasRunCancelEndpoint: 'https://your-api.example.com/v1/canvas/workflow-runs/cancel',
+  clearCanvasEndpoint: 'https://your-api.example.com/v1/canvas/clear',
+  packageCanvasEndpoint: 'https://your-api.example.com/v1/canvas/package',
+  canvasResultSelectEndpoint: 'https://your-api.example.com/v1/canvas/result-selection',
   batchPreviewEndpoint: 'https://your-api.example.com/v1/canvas/batch-preview',
   sessionEndpoint: 'https://your-api.example.com/v1/canvas/session',
   canvasChannelId: 'channel_image_generation',
   canvasExecutionSource: 'admin_managed',
-  canvasRoutingMode: 'health_weighted_best',
-  authMode: 'bearer',
-  authToken: 'YOUR_TOKEN',
-  credentialsMode: 'omit',
+  canvasRoutingMode: 'smart_failover',
+  credentialsMode: 'same-origin',
   requiresMembership: false
 };
 ```
 
 If you do not inject any runtime config, the OSS canvas should default to standalone local mode
 instead of assuming this repository's backend endpoints.
+
+The built-in API uses same-origin browser cookies for canvas login mode. Deploy the canvas behind the same origin as `/v1/*`, or add CORS and credential handling in your own integration layer before using a different canvas origin. The gateway does not emit permissive CORS headers by default.
 
 ## 2. Auth/session provider
 

@@ -122,14 +122,15 @@ cp apps/api/.env.example apps/api/.env
 - `ADMIN_USERNAME`
 - `ADMIN_PASSWORD`
 - `DATABASE_URL`
+- `ADMIN_SESSION_SECRET`
 
 如果你本地没有 Redis，可以先留空 `REDIS_URL`。
 
 说明：
 
-- 本项目现在统一以 PostgreSQL 作为正式持久层。
-- 不再建议也不再支持用本地 JSON 作为运行时正式配置存储。
-- 未提供 `DATABASE_URL` 时，API 会直接拒绝启动。
+- `pnpm dev:api` 会读取 `apps/api/.env`。
+- PostgreSQL 是正式持久层；未提供 `DATABASE_URL` 时 API 会拒绝启动。
+- 本地单 API 开发可以不配置 Redis；启动 PM2 集群或 Worker 时必须配置 Redis。
 
 ### 3. 启动
 
@@ -181,7 +182,7 @@ pnpm -r build
 
 - Node.js 22+
 - PostgreSQL 15+
-- Redis 7+（可选但推荐）
+- Redis 7+（PM2 集群与 Worker 必需；单 API 本地开发可省略）
 - PM2 或 systemd
 
 ### 3. 配置生产环境变量
@@ -191,17 +192,20 @@ pnpm -r build
 - `PORT`
 - `HOST`
 - `DATABASE_URL`
-- `REDIS_URL`（可选）
+- `PG_SCHEMA`
+- `REDIS_URL`
 - `ADMIN_DATA_DIR`
-- `PROVIDER_DATA_DIR`
 - `ADMIN_USERNAME`
 - `ADMIN_PASSWORD`
+- `ADMIN_SESSION_SECRET`
+- `PUBLIC_API_BASE_URL`
 - `DEFAULT_TEST_REFERENCE_IMAGE_URL`
 
 注意：
 
-- 必须提供 `DATABASE_URL`。
-- `ADMIN_DATA_DIR` / `PROVIDER_DATA_DIR` 仍可用于测试资源、临时文件、生成图片等目录，但不应该再承担正式配置持久化。
+- 必须提供 `DATABASE_URL`；提供的 PM2 模板还会启动 Worker，因此也必须提供 `REDIS_URL`。
+- `ADMIN_DATA_DIR` 保存生成图片、画布临时参考图和接入探测预览图；正式配置与业务记录保存在 PostgreSQL。
+- 如需启用 Nginx 内部加速图片文件，`GENERATED_IMAGE_ACCEL_REDIRECT_TARGET_DIR` 必须指向 `$ADMIN_DATA_DIR/generated-images`。
 
 ### 4. 启动 PM2
 
@@ -210,15 +214,19 @@ pnpm -r build
 示例：
 
 ```bash
-APP_CWD=/path/to/yali-canvas-oss \
+APP_CWD=/path/to/yaliai-canvas-oss/app \
 PM2_APP_NAME=yali-canvas-api \
+PM2_WORKER_APP_NAME=yali-canvas-worker \
 ADMIN_USERNAME=admin \
 ADMIN_PASSWORD='change-this-now' \
+ADMIN_SESSION_SECRET='replace-with-a-long-random-secret' \
 DATABASE_URL='postgresql://user:pass@127.0.0.1:5432/yali_canvas' \
+PG_SCHEMA=public \
 REDIS_URL='redis://127.0.0.1:6379' \
-ADMIN_DATA_DIR='/path/to/yali-canvas-oss/data' \
-PROVIDER_DATA_DIR='/path/to/yali-canvas-oss/data' \
+ADMIN_DATA_DIR='/path/to/yaliai-canvas-oss/data' \
+PUBLIC_API_BASE_URL='https://api.example.com' \
 DEFAULT_TEST_REFERENCE_IMAGE_URL='https://your-domain.example/test-assets/reference-test.png' \
+GENERATED_IMAGE_ACCEL_REDIRECT_TARGET_DIR='/path/to/yaliai-canvas-oss/data/generated-images' \
 pm2 start deploy/api/ecosystem.config.cjs
 ```
 

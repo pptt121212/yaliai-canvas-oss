@@ -49,11 +49,13 @@
 - pnpm 11+
 - PostgreSQL 15+
 
-强烈建议：
+必需组件：
 
 - Redis 7+
 - PM2
 - Nginx 或 Caddy
+
+提供的 PM2 模板默认启动 Worker 和多进程 API 集群，因此完整联动部署必须配置 Redis。
 
 ## 4. 安装依赖
 
@@ -73,17 +75,20 @@ pnpm install --frozen-lockfile
 PORT=4010
 HOST=0.0.0.0
 DATABASE_URL='postgresql://user:pass@127.0.0.1:5432/yaliai_canvas'
+PG_SCHEMA=public
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD='change-this-now'
+ADMIN_SESSION_SECRET='replace-with-a-long-random-secret'
 ```
 
 推荐同时配置：
 
 ```bash
 REDIS_URL='redis://127.0.0.1:6379'
-ADMIN_DATA_DIR=/opt/yali-canvas-oss/data
-PROVIDER_DATA_DIR=/opt/yali-canvas-oss/data
+ADMIN_DATA_DIR=/opt/yaliai-canvas-oss/data
+PUBLIC_API_BASE_URL='https://api.example.com'
 DEFAULT_TEST_REFERENCE_IMAGE_URL='https://your-domain.example/test-assets/reference-test.png'
+GENERATED_IMAGE_ACCEL_REDIRECT_TARGET_DIR=/opt/yaliai-canvas-oss/data/generated-images
 ```
 
 ## 6. 初始化数据库
@@ -109,18 +114,22 @@ pnpm --filter @yali/web build
 推荐 PM2：
 
 ```bash
-export APP_CWD=/opt/yali-canvas-oss
+export APP_CWD=/opt/yaliai-canvas-oss/app
 export PM2_APP_NAME=yali-canvas-api
+export PM2_WORKER_APP_NAME=yali-canvas-worker
 export NODE_ENV=production
 export PORT=4010
 export HOST=0.0.0.0
 export DATABASE_URL='postgresql://user:pass@127.0.0.1:5432/yaliai_canvas'
+export PG_SCHEMA=public
 export REDIS_URL='redis://127.0.0.1:6379'
-export ADMIN_DATA_DIR=/opt/yali-canvas-oss/data
-export PROVIDER_DATA_DIR=/opt/yali-canvas-oss/data
+export ADMIN_DATA_DIR=/opt/yaliai-canvas-oss/data
 export ADMIN_USERNAME=admin
 export ADMIN_PASSWORD='change-this-now'
+export ADMIN_SESSION_SECRET='replace-with-a-long-random-secret'
+export PUBLIC_API_BASE_URL='https://api.example.com'
 export DEFAULT_TEST_REFERENCE_IMAGE_URL='https://your-domain.example/test-assets/reference-test.png'
+export GENERATED_IMAGE_ACCEL_REDIRECT_TARGET_DIR=/opt/yaliai-canvas-oss/data/generated-images
 
 pm2 start deploy/api/ecosystem.config.cjs
 pm2 save
@@ -153,8 +162,10 @@ pm2 save
 
 推荐做法：
 
-- 让 `apps/web` 所在域名把 `/v1/*` 反代到 `apps/api`
-- 或在宿主页面注入完整的 `window.yaliCanvasRuntime`
+- 让 `apps/web` 所在域名把 `/v1/*` 反代到 `apps/api`，使画布与 API 保持同源。
+- 或在宿主页面注入完整的 `window.yaliCanvasRuntime`，并由你的网关处理跨域、Cookie 和鉴权。
+
+本仓库 API 默认不返回宽松 CORS 响应头。若画布部署在 `canvas.example.com` 而 API 在 `api.example.com`，仅注入跨域 API 地址并不能让浏览器登录模式工作；请使用同源反向代理，或在你的外层网关明确实现 CORS 与凭据策略。
 
 ## 11. 首次初始化顺序
 

@@ -43,7 +43,7 @@ Production mode uses:
 - A separate worker process for canvas workflow queue execution.
 - Nginx or another reverse proxy for TLS, static assets, body-size limits, and internal generated-image acceleration.
 
-`DATABASE_URL` is required for production. Redis is strongly recommended when running more than one API process because route hot state, counters, and locks must be shared across processes.
+`DATABASE_URL` is required in every API process. Redis is required when running more than one API process and whenever the canvas Worker is enabled: route hot state, counters, task claims, and locks must be shared across processes. A single API process may omit Redis only for local development without the Worker.
 
 ## Request Flow
 
