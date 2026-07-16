@@ -9,14 +9,9 @@ The goal is simple:
 
 ## Compatibility Basis
 
-The rules below are written as provider-agnostic behavior. They describe how this gateway
-normalizes downstream OpenAI-compatible requests and adapts them to upstream providers with
-different Images or Responses protocol capabilities.
-- `sub.g-aisc.com` (`images`)
-- `sub.foropencode.com` (`images`)
-- `api.pixellelabs.com` (`images`)
-- `gpt2image.superapi.buzz` (`images`)
-- `www.jingyuapi.art` (`images`)
+The rules below are provider-agnostic. They describe how this gateway normalizes downstream
+OpenAI-compatible requests and adapts them to upstream providers with different Images or
+Responses protocol capabilities.
 
 ## Core rule
 
@@ -53,7 +48,7 @@ These must stay separated in:
 
 ### Typical request pattern
 
-Common observed request characteristics:
+Supported request characteristics include:
 
 - endpoint: `/v1/responses`
 - method: `POST`
@@ -63,7 +58,7 @@ Common observed request characteristics:
 - `tool_choice` often set to `image_generation`
 - edit-like behavior can still use `/v1/responses`
 
-Common body shapes observed:
+Supported body shapes include:
 
 - text-to-image:
   - `input` as string or message array
@@ -81,7 +76,7 @@ Common body shapes observed:
   - image sources often converted to `data URL` or base64-backed payload descriptors
   - `tools[0].action = edit`
 
-### Important observed behavior
+### Compatibility behavior
 
 - Some upstreams accept plain string `input`
 - Some upstreams are more reliable with multimodal message-array `input`
@@ -90,7 +85,7 @@ Common body shapes observed:
 
 ### Typical response patterns
 
-Common observed response types:
+Supported response types include:
 
 - SSE event stream with `response.created`
 - SSE event stream with `response.output_item.added`
@@ -98,7 +93,7 @@ Common observed response types:
 - partial image events
 - final image result embedded in later events
 
-Observed normalization rule:
+Normalization rule:
 
 - collect image-like outputs from SSE `data:` payloads
 - support `result`
@@ -110,7 +105,7 @@ Observed normalization rule:
 
 ### Typical request pattern
 
-Common observed request characteristics:
+Supported request characteristics include:
 
 - text-to-image:
   - endpoint: `/v1/images/generations`
@@ -122,7 +117,7 @@ Common observed request characteristics:
   - method: `POST`
   - body often `multipart/form-data`
 
-Common body fields observed:
+Supported body fields include:
 
 - `model`
 - `prompt`
@@ -142,7 +137,7 @@ For edit-like requests:
 - some upstreams work better with base64/data URL image references
 - downstream JSON aliases such as `image_url`, `image_urls[]`, `reference_images[]`, and `images[].image_url` are normalized internally before upstream routing
 
-### Important observed behavior
+### Compatibility behavior
 
 - `multipart` is the most stable default for `images/edits`
 - `images/generations` is usually JSON
@@ -153,7 +148,7 @@ For edit-like requests:
 
 ### Typical response patterns
 
-Observed response families:
+Supported response families include:
 
 1. standard JSON:
    - `{ created, data: [{ b64_json|url }] }`
@@ -170,15 +165,15 @@ Observed response families:
    - `Content-Type: image/jpeg`
    - `Content-Type: image/webp`
 
-Observed normalization rule:
+Normalization rule:
 
 - if upstream returns standard JSON: normalize directly
 - if upstream returns SSE: parse provider event payloads and extract final image item
 - if upstream returns binary image: encode internally and normalize to downstream image item
 
-## Real compatibility rules that matter
+## Configurable compatibility fields
 
-These settings have proved operationally meaningful:
+These fields control gateway adaptation:
 
 - upstream kind:
   - `responses_endpoint`

@@ -46,12 +46,13 @@ The backend must remain responsible for:
 
 The canvas UI should not decide which upstream provider is chosen.
 
-## Suggested routing modes
+## Image routing modes
 
-- `priority_failover`
-- `round_robin`
-- `weighted`
-- `least_recently_used`
+Tenant API keys can use these image routing modes:
+
+- `smart_failover`: score eligible providers and retry subsequent candidates after retryable upstream failures.
+- `smart_priority`: score providers but only attempt the highest-ranked candidate.
+- `fixed_provider`: send requests to the provider bound to the API key.
 
 ## Health model
 
@@ -62,9 +63,9 @@ Each provider may be in one of these states:
 - `degraded`
 - `disabled`
 
-## Open-source recommendation
+## Deployment modes
 
-For OSS flexibility, expose both:
+You can expose either or both provider sources:
 
 - server-managed provider pool
 - user-supplied provider path

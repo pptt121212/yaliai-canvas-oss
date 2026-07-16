@@ -1,34 +1,24 @@
 # Yali Canvas OSS
 
-## Independent Services
+面向自托管与二次开发的 AI 画布和 OpenAI 兼容图像 API 网关。项目提供画布工作流、上游协议适配、智能路由、租户与计费等可组合能力。
 
-This OSS project is intentionally split into two deployable services:
+## 服务边界
 
-1. `apps/api`: backend API routing, upstream provider management, tenant keys, billing, async tasks
-2. `apps/web`: frontend canvas UI
+核心服务可按需求独立部署：
 
-They are allowed to run independently.
+- `apps/api`：后端网关，负责上游管理、路由、租户、计费与异步任务。
+- `apps/web`：画布前端，负责工作流编辑、交互与结果展示。
+- `apps/admin`：管理后台，负责运行配置与运营管理。
 
-- If you only need the backend gateway, you can deploy `apps/api` without `apps/web`.
-- If you only need the canvas UI, you can deploy `apps/web` alone. It now boots in standalone local mode by default and does not call this repository's backend unless you explicitly inject runtime config.
-- The only accepted coupling is optional login-mode authorization, where the canvas uses a tenant API key or tenant session exposed by your own backend.
+- 只需要 API 网关时，可以仅部署 `apps/api`。
+- 只需要画布时，可以仅部署 `apps/web`；未注入运行时配置时，它以浏览器本地模式运行。
+- 需要完整平台能力时，将画布通过运行时配置接入本仓库的 API，或接入你自己的兼容后端。
 
-Open-source integration rule:
+二次开发时建议保持以下职责边界：
 
-- keep provider routing, tenant auth, billing, and async orchestration in the backend
-- keep workflow editing, local-mode execution, and browser-side UX in the frontend
-- do not hardcode one service as the mandatory runtime of the other
- 
-Deployment docs:
- 
-- [Deployment Overview](./docs/deployment.md)
-- [API Only Deployment](./docs/deployment-api-only.md)
-- [Web Only Deployment](./docs/deployment-web-only.md)
-- [Combined Deployment](./docs/deployment-combined.md)
- 
-一个面向开源场景的 AI 画布与图像 API 网关项目。
-
-它的目标不是复刻某个特定站点的现网实现，而是提供一套可以独立部署、继续二次开发、并且便于接入不同上游 API 的通用基础设施。
+- 后端处理上游选择、鉴权、计费和异步编排。
+- 前端处理工作流编辑、浏览器交互与本地执行体验。
+- 服务之间通过明确的运行时配置和 API 契约集成，不依赖固定域名或固定宿主应用。
 
 ## 项目组成
 
@@ -45,16 +35,16 @@ Deployment docs:
 - `packages/billing-core`
   额度与计费相关基础契约。
 
-## 开源项目默认原则
+## 首次配置
 
-这个仓库默认遵循以下规则：
+首次启动后，请在管理后台完成：
 
-- 不内置任何真实生产域名、真实服务器路径、真实默认账号密码。
-- 不默认预置任何你必须信任的第三方上游 API。
-- 不把某个私有业务通道当作开箱即用默认值。
-- 默认测试资源尽量使用仓库自带静态资源，而不是外部站点资源。
+1. 添加并测试上游 API。
+2. 在业务通道中启用图像生成或文本处理线路。
+3. 创建租户与下游 API Key。
+4. 使用后台测试或标准下游接口验证请求链路。
 
-如果你 clone 后发现系统里没有任何上游线路，这是设计使然，不是缺失功能。
+仓库不预配置第三方上游；这使部署者能够自行控制模型、密钥、成本和路由策略。
 
 ## 当前支持的上游类型
 
@@ -209,34 +199,13 @@ DEFAULT_TEST_REFERENCE_IMAGE_URL='https://your-domain.example/test-assets/refere
 pm2 start deploy/api/ecosystem.config.cjs
 ```
 
-## 首次部署后你需要做什么
-
-第一次启动后，系统不会自动给你塞一堆默认上游。
-
-你需要按顺序完成：
-
-1. 登录后台
-2. 新增或探测上游 API
-3. 在“业务通道”里决定哪些上游加入图像生成或文本处理
-4. 创建租户与下游 API Key
-5. 用后台测试或下游标准接口验证链路
-
-## 默认不再内置的业务逻辑
-
-为了更适合开源分发，仓库已经去掉或弱化了以下默认绑定：
-
-- 不再内置真实生产后台账号密码
-- 不再在 PM2 配置里写死真实生产目录
-- 不再在仓库默认 provider seed 中预置某个私有上游
-- 不再默认依赖真实生产域名作为测试参考图地址
-- 不再把画布的登录跳转和充值跳转强绑到 `/admin/`
-
-这些都应该由部署者自己配置。
-
 ## 文档
 
+- [部署总览](./docs/deployment.md)
+- [仅部署 API](./docs/deployment-api-only.md)
+- [仅部署画布](./docs/deployment-web-only.md)
+- [完整联动部署](./docs/deployment-combined.md)
 - [架构说明](./docs/architecture.md)
-- [生产部署指南](./docs/deployment.md)
 - [存储说明](./docs/storage.md)
 - [集成说明](./docs/integration-guide.md)
 - [上游管理说明](./docs/provider-management.md)
