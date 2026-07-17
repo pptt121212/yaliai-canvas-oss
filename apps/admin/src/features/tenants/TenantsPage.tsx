@@ -893,8 +893,8 @@ export function TenantsPage({
                   >
                     <InputNumber
                       min={0}
-                      step={0.001}
-                      precision={4}
+                      step={0.00001}
+                      precision={5}
                       disabled={!Array.isArray(watchedFixedImageProviderIds) || !watchedFixedImageProviderIds.length}
                       placeholder={Array.isArray(watchedFixedImageProviderIds) && watchedFixedImageProviderIds.length ? '输入固定线路池一口价' : '先选择固定线路池'}
                       style={{ width: '100%' }}

@@ -1314,8 +1314,8 @@ function CapabilityProfilesEditor({
                 </Checkbox>
                 <InputNumber
                   min={0}
-                  precision={6}
-                  step={0.0001}
+                  precision={5}
+                  step={0.00001}
                   disabled={!enabled}
                   value={profile.costs?.[quality] ?? 0}
                   placeholder="成本（元）"

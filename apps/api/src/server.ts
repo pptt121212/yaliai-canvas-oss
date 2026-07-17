@@ -11,7 +11,14 @@ import {
   type OpenAIImagesEditProtocol,
   type ProviderConfig,
 } from '@yali/provider-core';
-import { classifyResolutionTier, parseImageSize, type ResolutionTier } from '@yali/billing-core';
+import {
+  classifyResolutionTier,
+  formatCnyMinorUnits,
+  minorUnitsToYuan,
+  parseImageSize,
+  type ResolutionTier,
+  yuanToMinorUnits,
+} from '@yali/billing-core';
 import { defaultWorkflow } from '@yali/workflow-schema';
 import { registerAdminRoutes } from './admin.js';
 import {
@@ -1056,19 +1063,19 @@ app.get('/v1/canvas/user/tenant-finance-ledger', async (request, reply) => {
     total: Number(total || 0),
     totalPages: Math.max(1, Math.ceil(Number(total || 0) / pageSize)),
     currentBalanceCents: Number(balance?.balanceCents || 0),
-    currentBalanceYuan: Number((Number(balance?.balanceCents || 0) / 100).toFixed(2)),
+    currentBalanceYuan: minorUnitsToYuan(Number(balance?.balanceCents || 0)),
     todaySpentCents: Number(todaySpentCents || 0),
-    todaySpentYuan: Number((Number(todaySpentCents || 0) / 100).toFixed(2)),
+    todaySpentYuan: minorUnitsToYuan(Number(todaySpentCents || 0)),
     yesterdaySpentCents: Number(yesterdaySpentCents || 0),
-    yesterdaySpentYuan: Number((Number(yesterdaySpentCents || 0) / 100).toFixed(2)),
+    yesterdaySpentYuan: minorUnitsToYuan(Number(yesterdaySpentCents || 0)),
     rows: rows.map((row) => ({
       id: row.id,
       createdAt: row.createdAt,
       direction: row.direction,
       amountCents: row.amountCents,
-      amountYuan: Number((Number(row.amountCents || 0) / 100).toFixed(2)),
+      amountYuan: minorUnitsToYuan(Number(row.amountCents || 0)),
       balanceAfterCents: row.balanceAfterCents,
-      balanceAfterYuan: Number((Number(row.balanceAfterCents || 0) / 100).toFixed(2)),
+      balanceAfterYuan: minorUnitsToYuan(Number(row.balanceAfterCents || 0)),
       note: String(row.note || '').trim(),
       currency: row.currency,
       requestId: typeof row.detail?.requestId === 'string' ? row.detail.requestId : '',
@@ -1880,7 +1887,7 @@ function buildCanvasUserSafePayload(input: {
     tenantId: input.user.tenantId,
     apiKeyId: input.user.apiKeyId || '',
     tenantBalanceCents: Math.max(0, Number(input.tenantBalanceCents || 0)),
-    tenantBalanceYuan: Number((Math.max(0, Number(input.tenantBalanceCents || 0)) / 100).toFixed(2)),
+    tenantBalanceYuan: minorUnitsToYuan(Math.max(0, Number(input.tenantBalanceCents || 0))),
     generatedApiKey: input.rawApiKey || '',
     generatedApiKeyMasked: input.rawApiKey ? maskSecret(input.rawApiKey) : '',
     apiKeySettings: {
@@ -5186,14 +5193,14 @@ function resolveImageSellPriceCents(input: {
   tier?: ResolutionTier | 'auto' | null;
   quality?: string | null;
 }) {
-  return Math.max(0, Math.round(resolveImageSellPrice(input) * 100));
+  return Math.max(0, yuanToMinorUnits(resolveImageSellPrice(input)));
 }
 
 function resolveChatCompletionsSellPriceCents() {
   const catalog = adminConsoleCatalogStore.get();
   const yuan = Number(catalog.chatCompletionsUnitPriceYuan);
   if (Number.isFinite(yuan)) {
-    return Math.max(0, Math.round(yuan * 100));
+    return Math.max(0, yuanToMinorUnits(yuan));
   }
   // Legacy catalogs stored this setting directly in cents.
   return Math.max(0, Number(catalog.chatCompletionsUnitPrice || 0));
@@ -5216,7 +5223,7 @@ function resolveFixedApiKeyImageSellPriceCents(accessContext?: RequestAccessCont
   if (!Number.isFinite(flatPrice) || flatPrice <= 0) {
     return 0;
   }
-  return Math.max(0, Math.round(flatPrice * 100));
+  return Math.max(0, yuanToMinorUnits(flatPrice));
 }
 
 async function ensureTenantPositiveBalance(input: {
@@ -5437,7 +5444,7 @@ async function buildActualImageBilling(input: {
         billingMode,
         billingModeLabel,
         billedPricingMode: billingMode,
-        fixedImageFlatPriceCents: fixedUnitCents > 0 ? fixedUnitCents : null,
+        fixedImageFlatPriceMinorUnits: fixedUnitCents > 0 ? fixedUnitCents : null,
         imageUrl: record.imageUrl || null,
         extractionSource: record.extractionSource,
       },
@@ -6896,11 +6903,12 @@ app.post('/v1/images/generations', async (request, reply) => {
   if (!budget.allowed) {
     const errorPayload = imageEndpointError({
       code: 'insufficient_balance',
-      message: `Insufficient tenant balance. Current balance: ${(Number(budget.balanceCents || 0) / 100).toFixed(2)} CNY.`,
+      message: `Insufficient tenant balance. Current balance: ${formatCnyMinorUnits(Number(budget.balanceCents || 0), 2)} CNY.`,
       statusCode: 402,
       failureCategory: 'terminal_billing',
       details: {
-        balance_cents: Number(budget.balanceCents || 0),
+        balance_minor_units: Number(budget.balanceCents || 0),
+        balance_yuan: minorUnitsToYuan(Number(budget.balanceCents || 0)),
       },
     });
     await appendImageEndpointRejectionTrace({
@@ -7129,11 +7137,12 @@ app.post('/v1/images/edits', async (request, reply) => {
   if (!budget.allowed) {
     const errorPayload = imageEndpointError({
       code: 'insufficient_balance',
-      message: `Insufficient tenant balance. Current balance: ${(Number(budget.balanceCents || 0) / 100).toFixed(2)} CNY.`,
+      message: `Insufficient tenant balance. Current balance: ${formatCnyMinorUnits(Number(budget.balanceCents || 0), 2)} CNY.`,
       statusCode: 402,
       failureCategory: 'terminal_billing',
       details: {
-        balance_cents: Number(budget.balanceCents || 0),
+        balance_minor_units: Number(budget.balanceCents || 0),
+        balance_yuan: minorUnitsToYuan(Number(budget.balanceCents || 0)),
       },
     });
     await appendImageEndpointRejectionTrace({
@@ -7459,7 +7468,7 @@ async function resolveChatRequestAccessContext(
             granted: false,
             statusCode: 402,
             error: 'insufficient_balance',
-            message: `Insufficient tenant balance. Current balance: ${(balanceCents / 100).toFixed(2)} CNY.`,
+            message: `Insufficient tenant balance. Current balance: ${formatCnyMinorUnits(balanceCents, 2)} CNY.`,
           };
         }
       }
@@ -7586,7 +7595,7 @@ async function resolveChatRequestAccessContext(
         granted: false,
         statusCode: 402,
         error: 'insufficient_balance',
-        message: `Insufficient tenant balance. Current balance: ${(balanceCents / 100).toFixed(2)} CNY.`,
+        message: `Insufficient tenant balance. Current balance: ${formatCnyMinorUnits(balanceCents, 2)} CNY.`,
       };
     }
   }
@@ -7630,8 +7639,7 @@ async function recordChatCompletionCharge(input: {
     billingModeLabel: 'Chat Completions 按次计费',
     sellPriceCents: input.sellPriceCents,
     upstreamCostYuan: Math.max(0, Number(input.attempt.upstreamCostYuan || 0)),
-    // Retained for older readers. Exact operational cost is the yuan field above.
-    upstreamCostCents: Math.round(Math.max(0, Number(input.attempt.upstreamCostYuan || 0)) * 100),
+    upstreamCostMinorUnits: yuanToMinorUnits(Math.max(0, Number(input.attempt.upstreamCostYuan || 0))),
     upstreamName: input.attempt.providerName,
     upstreamBaseUrl: input.attempt.providerBaseUrl,
     responseStatusCode: input.responseStatusCode,
@@ -7891,7 +7899,7 @@ app.get('/v1/canvas/session', async (request, reply) => {
     currentUserEmail: currentUser?.email || '',
     currentTenantId: currentUser?.tenantId || '',
     currentTenantBalanceCents: Math.max(0, Number(balance?.balanceCents || 0)),
-    currentTenantBalanceYuan: Number((Math.max(0, Number(balance?.balanceCents || 0)) / 100).toFixed(2)),
+    currentTenantBalanceYuan: minorUnitsToYuan(Math.max(0, Number(balance?.balanceCents || 0))),
     maxConcurrentGenerations: apiKey?.maxConcurrency || 10,
     executionOwnerLock: '',
     canvasAccess: {
@@ -8785,14 +8793,14 @@ function resolveOperationalImageCost(
     const value = Number(profile.costs[quality] || 0);
     return {
       configured: Number.isFinite(value),
-      valueCredits: Number.isFinite(value) ? Math.max(0, value * 100) : 0,
+      valueCredits: Number.isFinite(value) ? Math.max(0, yuanToMinorUnits(value)) : 0,
     };
   }
   const fallback = resolveHighestOperationalImageCost(profiles);
   if (fallback) {
     return {
       configured: true,
-      valueCredits: Math.max(0, fallback.value * 100),
+      valueCredits: Math.max(0, yuanToMinorUnits(fallback.value)),
     };
   }
   return { configured: false, valueCredits: 0 };

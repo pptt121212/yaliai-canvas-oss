@@ -10,7 +10,7 @@ import type {
   ConsoleUpstream,
   ConsoleUpstreamKind,
 } from '../../shared/types';
-import { EllipsisText, PageHeader, SectionTitle, StatusDot } from '../../shared/ui';
+import { EllipsisText, formatCredits, PageHeader, SectionTitle, StatusDot } from '../../shared/ui';
 
 const { Text } = Typography;
 
@@ -38,12 +38,11 @@ const emptyMetric: ChannelPerformanceMetric = {
 };
 
 function formatCurrency(value: number) {
-  return `¥${(Number(value || 0) / 100).toFixed(2)}`;
+  return formatCredits(value);
 }
 
 function formatReportCurrency(value: number) {
-  const yuan = Number(value || 0) / 100;
-  return `¥${yuan.toFixed(5)}`;
+  return formatCredits(value);
 }
 
 function formatDuration(value: number) {

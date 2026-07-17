@@ -18,7 +18,7 @@ import {
 } from 'antd';
 import { useEffect } from 'react';
 import type { AdminConsoleCatalog, AdminControlPlaneConfig, OverviewPayload } from '../../shared/types';
-import { PageHeader, StatStrip, StatusDot } from '../../shared/ui';
+import { formatCredits, PageHeader, StatStrip, StatusDot } from '../../shared/ui';
 
 const { Text } = Typography;
 
@@ -47,7 +47,7 @@ function bytes(value?: number | null) {
 }
 
 function money(cents?: number | null) {
-  return `￥${(Number(cents || 0) / 100).toFixed(2)}`;
+  return formatCredits(cents);
 }
 
 function duration(seconds?: number | null) {

@@ -125,7 +125,8 @@ export function ImagePricingPage({ catalog, saving, onSave }: ImagePricingPagePr
                 render: (value: number, record: PricingTableRow) => (
                   <InputNumber
                     min={0}
-                    precision={2}
+                    precision={5}
+                    step={0.00001}
                     value={value}
                     style={{ width: '100%' }}
                     onChange={(next) => updatePrice(record.tier, quality, Number(next || 0))}
@@ -134,7 +135,7 @@ export function ImagePricingPage({ catalog, saving, onSave }: ImagePricingPagePr
               })),
             ]}
           />
-          <Text type="secondary">价格单位为人民币元；系统只在实际扣费、余额和财务流水时统一转换为整数分。这里的“预估”不代表最终实扣；最终实扣请以“计费流水”页中的计费尺寸、计费档位和实扣金额为准。</Text>
+          <Text type="secondary">价格单位为人民币元；实际扣费、余额和财务流水以 0.00001 元的整数最小单位精确保存。这里的“预估”不代表最终实扣；最终实扣请以“计费流水”页中的计费尺寸、计费档位和实扣金额为准。</Text>
         </Space>
       </Card>
 
@@ -145,7 +146,8 @@ export function ImagePricingPage({ catalog, saving, onSave }: ImagePricingPagePr
           </SectionTitle>
           <InputNumber
             min={0}
-            precision={2}
+            precision={5}
+            step={0.00001}
             value={chatCompletionsUnitPriceYuan}
             style={{ width: 240 }}
             addonAfter="元 / 次"

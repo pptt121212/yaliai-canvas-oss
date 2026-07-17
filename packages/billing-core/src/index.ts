@@ -5,6 +5,47 @@ export type BillingQuoteInput = {
   duration?: number;
 };
 
+/** CNY is represented as integer one-hundred-thousandths of a yuan. */
+export const CNY_MINOR_UNIT_SCALE = 100_000;
+export const CNY_MINOR_UNIT_FRACTION_DIGITS = 5;
+
+export function yuanToMinorUnits(value: number | string | null | undefined) {
+  const normalized = String(value ?? '').trim();
+  const match = normalized.match(/^([+-]?)(\d+)(?:\.(\d+))?$/);
+  if (!match) {
+    return 0;
+  }
+  const whole = Number(match[2]);
+  if (!Number.isSafeInteger(whole)) {
+    throw new Error('cny_amount_out_of_range');
+  }
+  const paddedFraction = `${match[3] || ''}000000`;
+  let fraction = Number(paddedFraction.slice(0, CNY_MINOR_UNIT_FRACTION_DIGITS));
+  if (Number(paddedFraction[CNY_MINOR_UNIT_FRACTION_DIGITS] || '0') >= 5) {
+    fraction += 1;
+  }
+  const absolute = whole * CNY_MINOR_UNIT_SCALE + fraction;
+  if (!Number.isSafeInteger(absolute)) {
+    throw new Error('cny_amount_out_of_range');
+  }
+  return match[1] === '-' ? -absolute : absolute;
+}
+
+export function minorUnitsToYuan(value: number | null | undefined) {
+  return Math.trunc(Number(value || 0)) / CNY_MINOR_UNIT_SCALE;
+}
+
+export function formatCnyMinorUnits(value: number | null | undefined, minimumFractionDigits = 2) {
+  const normalized = Math.trunc(Number(value || 0));
+  const negative = normalized < 0;
+  const absolute = Math.abs(normalized);
+  const whole = Math.floor(absolute / CNY_MINOR_UNIT_SCALE);
+  const fraction = String(absolute % CNY_MINOR_UNIT_SCALE).padStart(CNY_MINOR_UNIT_FRACTION_DIGITS, '0');
+  const minimum = Math.max(0, Math.min(CNY_MINOR_UNIT_FRACTION_DIGITS, Math.trunc(minimumFractionDigits)));
+  const visibleFraction = fraction.replace(/0+$/, '').padEnd(minimum, '0');
+  return `${negative ? '-' : ''}${whole}${visibleFraction ? `.${visibleFraction}` : ''}`;
+}
+
 export type BillingQuote = {
   reserveCredits: number;
   maxChargeCredits: number;

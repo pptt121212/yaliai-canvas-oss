@@ -136,7 +136,7 @@ export function BillingLedgerPage({ report }: BillingLedgerPageProps) {
             <Descriptions.Item label="租户">{row.tenantName || row.tenantId}</Descriptions.Item>
             <Descriptions.Item label="下游 Key">{row.apiKeyName || row.apiKeyId}</Descriptions.Item>
             <Descriptions.Item label="计费方式">{row.billingModeLabel || 'Chat Completions 按次计费'}</Descriptions.Item>
-            <Descriptions.Item label="上游固定成本">{formatCredits(Number(row.detail?.upstreamCostCents || 0))}</Descriptions.Item>
+            <Descriptions.Item label="上游固定成本">{formatCredits(Number(row.detail?.upstreamCostMinorUnits ?? row.detail?.upstreamCostCents ?? 0))}</Descriptions.Item>
             <Descriptions.Item label="计费详情">{renderJson(row.detail)}</Descriptions.Item>
           </Descriptions>
         ),
@@ -148,7 +148,7 @@ export function BillingLedgerPage({ report }: BillingLedgerPageProps) {
         { title: '上游 API', dataIndex: 'upstreamName', width: 175, render: (value?: string) => <EllipsisText value={value} /> },
         { title: '模型', dataIndex: 'model', width: 150, render: (value?: string) => <EllipsisText value={value} /> },
         { title: '计费方式', dataIndex: 'billingModeLabel', width: 175, render: (value?: string) => <EllipsisText value={value || 'Chat Completions 按次计费'} /> },
-        { title: '上游固定成本', key: 'upstreamCostCents', width: 125, align: 'right', render: (_: unknown, row: (typeof rows)[number]) => <span className="tabular">{formatCredits(Number(row.detail?.upstreamCostCents || 0))}</span> },
+        { title: '上游固定成本', key: 'upstreamCostCents', width: 125, align: 'right', render: (_: unknown, row: (typeof rows)[number]) => <span className="tabular">{formatCredits(Number(row.detail?.upstreamCostMinorUnits ?? row.detail?.upstreamCostCents ?? 0))}</span> },
         { title: '实扣金额', dataIndex: 'chargedCredits', width: 115, align: 'right', render: (value: number) => <span className="tabular">{formatCredits(value)}</span> },
         { title: '状态', dataIndex: 'status', width: 100, render: (value: string) => <StatusDot tone={statusTone(value)}>{statusLabel(value)}</StatusDot> },
         { title: '请求 ID', dataIndex: 'requestId', width: 175, render: (value?: string) => <CompactId value={value} /> },

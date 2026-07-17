@@ -3,6 +3,8 @@
  * 时间：YYYY-MM-DD HH:mm:ss（24h）；金额：分 → ￥元；空值：— 。
  */
 
+import { formatCnyMinorUnits } from '@yali/billing-core';
+
 const DASH = '—';
 
 export function formatDateTime(value?: number | null): string {
@@ -20,15 +22,14 @@ export function formatDateTime(value?: number | null): string {
   );
 }
 
-/** 分 → ￥元，保留两位小数 */
+/** Integer 0.00001-yuan units -> formatted CNY. */
 export function formatCredits(cents?: number | null): string {
-  return `￥${(Number(cents || 0) / 100).toFixed(2)}`;
+  return `￥${formatCnyMinorUnits(cents, 2)}`;
 }
 
-/** Report-only formatter. Financial balances and billing remain integer cents. */
+/** Operational reports use the same precise accounting unit as financial balances. */
 export function formatReportCostCredits(cents?: number | null): string {
-  const yuan = Number(cents || 0) / 100;
-  return `￥${yuan.toFixed(5)}`;
+  return `￥${formatCnyMinorUnits(cents, 2)}`;
 }
 
 /** 空值统一显示为 em dash */

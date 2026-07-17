@@ -1527,7 +1527,7 @@ function filterNodeTypesForLocalMode(types = [], isLocalMode = false) {
 
 function formatFinanceAmountYuan(value) {
   const amount = Number(value || 0);
-  return `¥${amount.toFixed(2)}`;
+  return `¥${amount.toFixed(5).replace(/\.?0+$/, '')}`;
 }
 
 function formatFinanceLedgerTime(value) {
