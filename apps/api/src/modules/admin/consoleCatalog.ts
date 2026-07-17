@@ -268,6 +268,7 @@ export type AdminConsoleCatalog = {
   apiKeys: ConsoleApiKey[];
   imagePricingMatrix: ImageSellPriceRow[];
   chatCompletionsUnitPrice: number;
+  chatCompletionsUnitPriceYuan?: number;
   systemPolicy: ConsoleSystemPolicy;
 };
 
@@ -1423,6 +1424,7 @@ function deriveSeedCatalog(): AdminConsoleCatalog {
     apiKeys: [],
     imagePricingMatrix: defaultImagePricingMatrix(),
     chatCompletionsUnitPrice: 0,
+    chatCompletionsUnitPriceYuan: 0,
     systemPolicy: defaultSystemPolicy(),
   };
 }
@@ -1539,6 +1541,9 @@ function normalizeCatalog(raw: unknown): AdminConsoleCatalog {
     }),
     imagePricingMatrix: normalizeImagePricingMatrix(source.imagePricingMatrix),
     chatCompletionsUnitPrice: Math.max(0, Number(source.chatCompletionsUnitPrice || 0)),
+    ...(Number.isFinite(Number(source.chatCompletionsUnitPriceYuan))
+      ? { chatCompletionsUnitPriceYuan: Math.max(0, Number(source.chatCompletionsUnitPriceYuan)) }
+      : {}),
     systemPolicy: (source.systemPolicy as ConsoleSystemPolicy) || defaultSystemPolicy(),
   };
 }

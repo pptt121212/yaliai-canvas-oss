@@ -598,6 +598,7 @@ const consoleChannelSchema = z.object({
 const imagePricingMatrixSchema = z.object({
   rows: z.array(imageSellPriceRowSchema),
   chatCompletionsUnitPrice: z.number().nonnegative().optional(),
+  chatCompletionsUnitPriceYuan: z.number().nonnegative().optional(),
 });
 
 const consoleTenantSchema = z.object({
@@ -2523,6 +2524,9 @@ export async function registerAdminRoutes(app: FastifyInstance) {
       ...catalog,
       imagePricingMatrix: body.rows,
       chatCompletionsUnitPrice: Math.max(0, Number(body.chatCompletionsUnitPrice ?? catalog.chatCompletionsUnitPrice ?? 0)),
+      ...(body.chatCompletionsUnitPriceYuan !== undefined
+        ? { chatCompletionsUnitPriceYuan: Math.max(0, Number(body.chatCompletionsUnitPriceYuan)) }
+        : {}),
     }));
   });
 

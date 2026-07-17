@@ -901,6 +901,7 @@ export type AdminConsoleCatalog = {
   apiKeys: ConsoleApiKey[];
   imagePricingMatrix: ImageSellPriceRow[];
   chatCompletionsUnitPrice: number;
+  chatCompletionsUnitPriceYuan?: number;
   systemPolicy: ConsoleSystemPolicy;
 };
 

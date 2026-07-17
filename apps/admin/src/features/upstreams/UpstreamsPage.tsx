@@ -1318,7 +1318,7 @@ function CapabilityProfilesEditor({
                   step={0.0001}
                   disabled={!enabled}
                   value={profile.costs?.[quality] ?? 0}
-                  placeholder="成本"
+                  placeholder="成本（元）"
                   style={{ width: '100%' }}
                   onChange={(next) => updateCell(profile.tier, quality, true, Number(next || 0))}
                 />
@@ -1329,7 +1329,7 @@ function CapabilityProfilesEditor({
       ))}
       <div className="capability-matrix__note">
         <Text type="secondary">
-          每个格子都是一个真实的“分辨率 + 质量”组合。勾选表示该上游支持该组合；成本用于记录该组合的上游单次成本，并为后续路由成本对比提供依据。
+          每个格子都是一个真实的“分辨率 + 质量”组合。勾选表示该上游支持该组合；成本按人民币元 / 张填写，用于记录该组合的上游单次成本，并为后续路由成本对比提供依据。
         </Text>
       </div>
     </div>

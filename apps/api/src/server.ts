@@ -5189,6 +5189,16 @@ function resolveImageSellPriceCents(input: {
   return Math.max(0, Math.round(resolveImageSellPrice(input) * 100));
 }
 
+function resolveChatCompletionsSellPriceCents() {
+  const catalog = adminConsoleCatalogStore.get();
+  const yuan = Number(catalog.chatCompletionsUnitPriceYuan);
+  if (Number.isFinite(yuan)) {
+    return Math.max(0, Math.round(yuan * 100));
+  }
+  // Legacy catalogs stored this setting directly in cents.
+  return Math.max(0, Number(catalog.chatCompletionsUnitPrice || 0));
+}
+
 function resolveFixedApiKeyImageSellPriceCents(accessContext?: RequestAccessContext) {
   if (!accessContext || accessContext.authMode !== 'tenant_key') {
     return 0;
@@ -7663,7 +7673,7 @@ async function recordChatCompletionCharge(input: {
 app.post('/v1/chat/completions', async (request, reply) => {
   const body = z.record(z.string(), z.unknown()).parse(request.body);
   const providerSource = body.provider_source === 'user_supplied' ? 'user_supplied' : 'admin_managed';
-  const sellPriceCents = Math.max(0, Number(adminConsoleCatalogStore.get().chatCompletionsUnitPrice || 0));
+  const sellPriceCents = resolveChatCompletionsSellPriceCents();
   const accessResult = await resolveChatRequestAccessContext(
     request.headers as Record<string, unknown>,
     providerSource,
