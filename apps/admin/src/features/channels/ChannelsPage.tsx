@@ -10,7 +10,7 @@ import type {
   ConsoleUpstream,
   ConsoleUpstreamKind,
 } from '../../shared/types';
-import { EllipsisText, PageHeader, SectionTitle, StatusDot } from '../../shared/ui';
+import { EllipsisText, PageHeader, SectionTitle, StatusDot, formatCredits } from '../../shared/ui';
 
 const { Text } = Typography;
 
@@ -38,7 +38,7 @@ const emptyMetric: ChannelPerformanceMetric = {
 };
 
 function formatCurrency(value: number) {
-  return `¥${(Number(value || 0) / 100).toFixed(2)}`;
+  return formatCredits(value);
 }
 
 function formatDuration(value: number) {
@@ -168,10 +168,12 @@ function TextPriceEditor({
 }) {
   return (
     <Space align="center" wrap>
-      <Text>每次调用成本</Text>
+      <Text>每次调用成本（元）</Text>
       <InputNumber
         disabled={!selected}
         min={0}
+        precision={5}
+        step={0.00001}
         value={policy.pricing.chatUnit}
         onChange={(value) => onChange({ chatUnit: Number(value || 0) })}
       />

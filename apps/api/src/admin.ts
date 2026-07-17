@@ -9,6 +9,7 @@ import {
   type ProviderConfig,
   type ProviderRoutingMode,
 } from '@yali/provider-core';
+import { yuanToMinorUnits } from '@yali/billing-core';
 import { adaptOpenAIImagesPayloadForProvider, buildImageRequestPlanForProvider } from './imageGateway.js';
 import { providerRegistry } from './providerRegistry.js';
 import { buildSmartImageRoutingPlan, classifyUpstreamFailure } from './smartImageRouting.js';
@@ -731,7 +732,9 @@ const canvasUsersQuerySchema = z.object({
 const tenantFinanceAdjustSchema = z.object({
   tenantId: z.string().min(1),
   direction: z.enum(['credit', 'debit']),
-  amountYuan: z.coerce.number().positive(),
+  amountYuan: z.coerce.number().positive().refine((value) => yuanToMinorUnits(value) > 0, {
+    message: 'amount_must_be_at_least_0.00001_cny',
+  }),
   note: z.string().trim().min(1).max(500),
 });
 
@@ -1348,7 +1351,7 @@ function imageCostYuanToCredits(value: number) {
   if (!Number.isFinite(normalized)) {
     return 0;
   }
-  return Math.max(0, Math.round(normalized * 100));
+  return Math.max(0, yuanToMinorUnits(normalized));
 }
 
 function computeEligibleSuccessRate(completedCount: number, eligibleRequestCount: number) {
@@ -1476,7 +1479,7 @@ async function buildChannelPerformanceReport(days: number) {
     const runtimeProvider = runtimeProviderById.get(upstreamId);
     const traces = summarizeTraceRows(textTraceRows.filter((item) => item.upstreamId === upstreamId));
     const billingRows = textBillingRows.filter((item) => item.upstreamId === upstreamId);
-    const unitCost = Math.max(0, Number(textPolicyByUpstreamId.get(upstreamId)?.pricing.chatUnit || 0));
+    const unitCost = Math.max(0, yuanToMinorUnits(textPolicyByUpstreamId.get(upstreamId)?.pricing.chatUnit || 0));
     const billedUnitCount = billingRows.reduce((sum, item) => sum + Math.max(0, Number(item.unitCount || 0)), 0);
     const persistedUpstreamCostCredits = billingRows.reduce((sum, item) => (
       sum + Math.max(0, Number(item.upstreamUnitCostCredits || 0)) * Math.max(0, Number(item.unitCount || 0))
@@ -2296,7 +2299,7 @@ export async function registerAdminRoutes(app: FastifyInstance) {
         message: 'Tenant not found.',
       };
     }
-    const amountCents = Math.round(Number(body.amountYuan) * 100);
+    const amountCents = yuanToMinorUnits(body.amountYuan);
     const record = await createTenantFinanceLedger({
       tenantId: body.tenantId,
       operatorId: session.username,

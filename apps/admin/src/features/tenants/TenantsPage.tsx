@@ -649,7 +649,7 @@ export function TenantsPage({
                                 </Text>
                                 <Text type="secondary" style={{ fontSize: 12 }}>
                                   {Number(record.fixedImageFlatPrice || 0) > 0
-                                    ? `一口价 ¥${Number(record.fixedImageFlatPrice || 0).toFixed(4)} / 张`
+                                    ? `一口价 ¥${Number(record.fixedImageFlatPrice || 0).toFixed(5)} / 张`
                                     : '未设置一口价，按共享线路价格表计费'}
                                 </Text>
                               </>
@@ -893,8 +893,8 @@ export function TenantsPage({
                   >
                     <InputNumber
                       min={0}
-                      step={0.001}
-                      precision={4}
+                      precision={5}
+                      step={0.00001}
                       disabled={!Array.isArray(watchedFixedImageProviderIds) || !watchedFixedImageProviderIds.length}
                       placeholder={Array.isArray(watchedFixedImageProviderIds) && watchedFixedImageProviderIds.length ? '输入固定线路池一口价' : '先选择固定线路池'}
                       style={{ width: '100%' }}

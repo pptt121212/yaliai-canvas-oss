@@ -119,7 +119,7 @@ export function ImagePricingPage({ catalog, saving, onSave }: ImagePricingPagePr
                 render: (value: number, record: PricingTableRow) => (
                   <InputNumber
                     min={0}
-                    precision={2}
+                    precision={5}
                     value={value}
                     style={{ width: '100%' }}
                     onChange={(next) => updatePrice(record.tier, quality, Number(next || 0))}
@@ -128,7 +128,7 @@ export function ImagePricingPage({ catalog, saving, onSave }: ImagePricingPagePr
               })),
             ]}
           />
-          <Text type="secondary">价格单位沿用当前系统的人民币分制记账逻辑。这里的“预估”只用于请求前余额校验，不代表最终实扣；最终实扣请以“计费流水”页中的计费尺寸、计费档位和实扣金额为准。</Text>
+          <Text type="secondary">价格单位为人民币元，系统以 0.00001 元为最小记账单位。这里的“预估”只用于请求前余额校验，不代表最终实扣；最终实扣请以“计费流水”页中的计费尺寸、计费档位和实扣金额为准。</Text>
         </Space>
       </Card>
 
@@ -139,10 +139,10 @@ export function ImagePricingPage({ catalog, saving, onSave }: ImagePricingPagePr
           </SectionTitle>
           <InputNumber
             min={0}
-            precision={2}
+            precision={5}
             value={chatCompletionsUnitPrice}
             style={{ width: 240 }}
-            addonAfter="分 / 次"
+            addonAfter="元 / 次"
             onChange={(next) => setChatCompletionsUnitPrice(Math.max(0, Number(next || 0)))}
           />
           <Text type="secondary">只有使用平台托管 Chat Completions 上游并且请求成功时，才会按该价格写入计费流水；用户自带 Chat API 不走平台扣费。</Text>

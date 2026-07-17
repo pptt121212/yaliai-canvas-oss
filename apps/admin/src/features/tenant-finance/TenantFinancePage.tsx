@@ -221,7 +221,7 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
                 <Text strong>{item.account.username}</Text>
                 <Text type="secondary">{item.account.email}</Text>
               </Space>
-              <Statistic title="当前余额" value={Number(item.balanceCents || 0) / 100} precision={2} prefix="￥" />
+              <Statistic title="当前余额" value={Number(item.balanceCents || 0) / 100_000} precision={5} prefix="￥" />
               <Space wrap size={12}>
                 <Text type="secondary">累计充值 <span className="tabular">{formatCredits(item.totalCreditedCents)}</span></Text>
                 <Text type="secondary">累计扣费 <span className="tabular">{formatCredits(item.totalDebitedCents)}</span></Text>
@@ -382,7 +382,7 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
             />
           </Form.Item>
           <Form.Item name="amountYuan" label="金额（元）" rules={[{ required: true, message: '请输入金额' }]}>
-            <InputNumber min={0.01} precision={2} style={{ width: '100%' }} />
+            <InputNumber min={0.00001} precision={5} step={0.00001} style={{ width: '100%' }} />
           </Form.Item>
           <Form.Item name="note" label="备注" rules={[{ required: true, message: '请输入备注' }]}>
             <Input.TextArea rows={4} placeholder="例如：线下充值、补差价、人工扣费" />
