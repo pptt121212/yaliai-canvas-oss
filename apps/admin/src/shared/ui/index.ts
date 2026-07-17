@@ -7,4 +7,4 @@ export { StatStrip } from './StatStrip';
 export type { StatItem } from './StatStrip';
 export { PageHeader } from './PageHeader';
 export { DrawerFooter } from './DrawerFooter';
-export { formatDateTime, formatCredits, EMPTY_DASH } from './format';
+export { formatDateTime, formatCredits, formatReportCostCredits, EMPTY_DASH } from './format';

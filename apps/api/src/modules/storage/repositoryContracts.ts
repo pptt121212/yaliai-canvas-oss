@@ -382,6 +382,7 @@ export type ChannelBillingAggregate = {
   tier?: string;
   quality?: string;
   unitCount: number;
+  upstreamUnitCostConfigured: boolean;
   upstreamUnitCostCredits: number;
   chargedCredits: number;
 };

@@ -180,7 +180,7 @@ function buildChannelPerformanceRollupRecords(input: {
     const channelId = normalizeRollupChannelId(row.channelId);
     const isChat = row.operation === 'chat_completions';
     const resolvedCost = isChat
-      ? { configured: row.upstreamUnitCostCredits > 0, valueCredits: row.upstreamUnitCostCredits }
+      ? { configured: row.upstreamUnitCostConfigured, valueCredits: row.upstreamUnitCostCredits }
       : input.costResolver
         ? input.costResolver({ upstreamId: row.upstreamId, tier: row.tier, quality: row.quality })
         : { configured: false, valueCredits: 0 };

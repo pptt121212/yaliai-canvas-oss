@@ -680,6 +680,7 @@ export type ChatCompletionsConfig = {
   supportsJsonMode: boolean;
   supportsTools: boolean;
   supportsVisionInput: boolean;
+  upstreamCostYuan?: number;
 };
 
 export type UpstreamTestPreset = {

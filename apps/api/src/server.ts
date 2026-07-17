@@ -7360,6 +7360,7 @@ function resolveOpenAICompatibleEndpoint(baseUrl: string, pathName: string) {
 async function getCanvasChatProviders() {
   const catalog = adminConsoleCatalogStore.get();
   const textChannel = catalog.channels.find((item) => item.id === textChannelId);
+  const upstreamById = new Map(catalog.upstreams.map((upstream) => [upstream.id, upstream]));
   const allowed = new Set(textChannel?.upstreamIds || []);
   const policyByUpstreamId = new Map((textChannel?.upstreamPolicies || []).map((policy) => [policy.upstreamId, policy]));
   const configuredProviders = providerRegistry.list()
@@ -7383,6 +7384,7 @@ async function getCanvasChatProviders() {
     .map((provider) => ({
       provider,
       policy: policyByUpstreamId.get(provider.providerId) || null,
+      upstream: upstreamById.get(provider.providerId),
     }));
 }
 
@@ -7598,7 +7600,7 @@ async function recordChatCompletionCharge(input: {
     providerId: string;
     providerName: string;
     providerBaseUrl: string;
-    upstreamCostCents: number;
+    upstreamCostYuan: number;
   };
   model: string;
   sellPriceCents: number;
@@ -7617,7 +7619,9 @@ async function recordChatCompletionCharge(input: {
     billingMode: 'global_chat_completions_unit_price',
     billingModeLabel: 'Chat Completions 按次计费',
     sellPriceCents: input.sellPriceCents,
-    upstreamCostCents: Math.max(0, Number(input.attempt.upstreamCostCents || 0)),
+    upstreamCostYuan: Math.max(0, Number(input.attempt.upstreamCostYuan || 0)),
+    // Retained for older readers. Exact operational cost is the yuan field above.
+    upstreamCostCents: Math.round(Math.max(0, Number(input.attempt.upstreamCostYuan || 0)) * 100),
     upstreamName: input.attempt.providerName,
     upstreamBaseUrl: input.attempt.providerBaseUrl,
     responseStatusCode: input.responseStatusCode,
@@ -7691,7 +7695,7 @@ app.post('/v1/chat/completions', async (request, reply) => {
     providerId: string;
     providerName: string;
     providerBaseUrl: string;
-    upstreamCostCents: number;
+    upstreamCostYuan: number;
     url: string;
     headers: Record<string, string>;
     body: Record<string, unknown>;
@@ -7703,7 +7707,7 @@ app.post('/v1/chat/completions', async (request, reply) => {
         providerId: 'user-supplied-openai-chat',
         providerName: 'User supplied Chat Completions',
         providerBaseUrl: userBaseUrl,
-        upstreamCostCents: 0,
+        upstreamCostYuan: 0,
         url: resolveOpenAICompatibleEndpoint(userBaseUrl, '/v1/chat/completions'),
         headers: {
           'Content-Type': 'application/json',
@@ -7715,11 +7719,13 @@ app.post('/v1/chat/completions', async (request, reply) => {
         body: sanitizedBody,
         timeoutMs: resolveChatRequestTimeoutMs(),
       }]
-    : (await getCanvasChatProviders()).map(({ provider, policy }) => ({
+    : (await getCanvasChatProviders()).map(({ provider, policy, upstream }) => ({
         providerId: provider.providerId,
         providerName: String(provider.name || provider.providerId),
         providerBaseUrl: provider.baseUrl,
-        upstreamCostCents: Math.max(0, Number(policy?.pricing.chatUnit || 0)),
+        upstreamCostYuan: Number.isFinite(Number(upstream?.chatConfig?.upstreamCostYuan))
+          ? Math.max(0, Number(upstream?.chatConfig?.upstreamCostYuan))
+          : Math.max(0, Number(policy?.pricing.chatUnit || 0)) / 100,
         url: resolveOpenAICompatibleEndpoint(provider.baseUrl, '/v1/chat/completions'),
         headers: {
           'Content-Type': 'application/json',
@@ -7768,7 +7774,7 @@ app.post('/v1/chat/completions', async (request, reply) => {
             providerId: attempt.providerId,
             providerName: attempt.providerName,
             providerBaseUrl: attempt.providerBaseUrl,
-            upstreamCostCents: Math.max(0, Number(attempt.upstreamCostCents || 0)),
+            upstreamCostYuan: Math.max(0, Number(attempt.upstreamCostYuan || 0)),
           },
           model: String(attempt.body.model || sanitizedBody.model || ''),
           sellPriceCents,
@@ -8769,14 +8775,14 @@ function resolveOperationalImageCost(
     const value = Number(profile.costs[quality] || 0);
     return {
       configured: Number.isFinite(value),
-      valueCredits: Number.isFinite(value) ? Math.max(0, Math.round(value * 100)) : 0,
+      valueCredits: Number.isFinite(value) ? Math.max(0, value * 100) : 0,
     };
   }
   const fallback = resolveHighestOperationalImageCost(profiles);
   if (fallback) {
     return {
       configured: true,
-      valueCredits: Math.max(0, Math.round(fallback.value * 100)),
+      valueCredits: Math.max(0, fallback.value * 100),
     };
   }
   return { configured: false, valueCredits: 0 };
@@ -8821,4 +8827,3 @@ app.listen({ port, host }).catch((error) => {
   app.log.error(error);
   process.exit(1);
 });
-

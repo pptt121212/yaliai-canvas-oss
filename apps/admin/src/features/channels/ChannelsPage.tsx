@@ -1,4 +1,4 @@
-import { Alert, Button, Card, Input, InputNumber, Select, Space, Switch, Table, Tabs, Tag, Typography } from 'antd';
+import { Alert, Button, Card, Input, Select, Space, Switch, Table, Tabs, Tag, Typography } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
 import { fetchChannelPerformanceReport } from '../../shared/api';
 import type {
@@ -39,6 +39,11 @@ const emptyMetric: ChannelPerformanceMetric = {
 
 function formatCurrency(value: number) {
   return `¥${(Number(value || 0) / 100).toFixed(2)}`;
+}
+
+function formatReportCurrency(value: number) {
+  const yuan = Number(value || 0) / 100;
+  return `¥${yuan.toFixed(5)}`;
 }
 
 function formatDuration(value: number) {
@@ -155,28 +160,6 @@ function sameStringArray(left: string[], right: string[]) {
     return false;
   }
   return left.every((item, index) => item === right[index]);
-}
-
-function TextPriceEditor({
-  selected,
-  policy,
-  onChange,
-}: {
-  selected: boolean;
-  policy: ConsoleChannelUpstreamPolicy;
-  onChange: (patch: Partial<ConsoleChannelUpstreamPolicy['pricing']>) => void;
-}) {
-  return (
-    <Space align="center" wrap>
-      <Text>每次调用成本</Text>
-      <InputNumber
-        disabled={!selected}
-        min={0}
-        value={policy.pricing.chatUnit}
-        onChange={(value) => onChange({ chatUnit: Number(value || 0) })}
-      />
-    </Space>
-  );
 }
 
 export function ChannelsPage({ catalog, saving, onSave, onSaveUpstream }: ChannelsPageProps) {
@@ -305,12 +288,12 @@ export function ChannelsPage({ catalog, saving, onSave, onSaveUpstream }: Channe
         ? [
             {
               label: '上游成本',
-              value: formatCurrency(metric.estimatedUpstreamCostCredits),
+              value: formatReportCurrency(metric.estimatedUpstreamCostCredits),
               note: `按当前成本矩阵估算，覆盖 ${metric.costedImageCount}/${metric.generatedImageCount} 张`,
             },
             {
               label: '毛差估算',
-              value: formatCurrency(metric.estimatedGrossMarginCredits),
+              value: formatReportCurrency(metric.estimatedGrossMarginCredits),
               note: '下游消费减当前成本估算',
               tone: metric.estimatedGrossMarginCredits >= 0 ? 'success' : 'danger',
             },
@@ -413,7 +396,7 @@ export function ChannelsPage({ catalog, saving, onSave, onSaveUpstream }: Channe
         width: 108,
         render: (_: unknown, record: AdminConsoleCatalog['upstreams'][number]) => (
           <div className="channel-table-metric">
-            <strong>{formatCurrency(upstreamMetricById.get(record.id)?.estimatedUpstreamCostCredits || 0)}</strong>
+            <strong>{formatReportCurrency(upstreamMetricById.get(record.id)?.estimatedUpstreamCostCredits || 0)}</strong>
             <span>当前配置估算</span>
           </div>
         ),
@@ -426,7 +409,7 @@ export function ChannelsPage({ catalog, saving, onSave, onSaveUpstream }: Channe
           const value = upstreamMetricById.get(record.id)?.estimatedGrossMarginCredits || 0;
           return (
             <div className={`channel-table-metric ${value < 0 ? 'is-negative' : 'is-positive'}`}>
-              <strong>{formatCurrency(value)}</strong>
+              <strong>{formatReportCurrency(value)}</strong>
               <span>消费 - 成本</span>
             </div>
           );
@@ -448,29 +431,6 @@ export function ChannelsPage({ catalog, saving, onSave, onSaveUpstream }: Channe
           />
         ),
       },
-      ...(channel.businessType === 'text_processing'
-        ? [{
-            title: '价格设置',
-            key: 'pricing',
-            width: 240,
-            render: (_: unknown, record: AdminConsoleCatalog['upstreams'][number]) => {
-              const selected = true;
-              const policy = policyByUpstreamId.get(record.id) || defaultPolicy(record.id);
-              const updatePricing = (patch: Partial<ConsoleChannelUpstreamPolicy['pricing']>) => {
-                if (!selected) {
-                  return;
-                }
-                const nextPolicies = syncPolicies(draft.upstreamIds, draft.upstreamPolicies).map((item) => (
-                  item.upstreamId === record.id
-                    ? { ...item, pricing: { ...item.pricing, ...patch } }
-                    : item
-                ));
-                updateDraft(id, { upstreamPolicies: nextPolicies });
-              };
-              return <TextPriceEditor selected={selected} policy={policy} onChange={updatePricing} />;
-            },
-          }]
-        : []),
       {
         title: '通道备注',
         key: 'notes',
@@ -507,7 +467,7 @@ export function ChannelsPage({ catalog, saving, onSave, onSaveUpstream }: Channe
               <SectionTitle
                 desc={channel.businessType === 'image_generation'
                   ? '所有 Images Endpoint 与 Responses Endpoint 上游会自动归属此通道；在这里控制线路启停。'
-                  : '所有 Chat Completions 上游会自动归属此通道；在这里控制线路启停和调用成本。'}
+                  : '所有 Chat Completions 上游会自动归属此通道；在这里控制线路启停。上游固定成本在“上游接入”中维护。'}
               >
                 {channel.name}通道
               </SectionTitle>

@@ -138,6 +138,7 @@ type FormShape = {
   supportsJsonMode?: boolean;
   supportsTools?: boolean;
   supportsVisionInput?: boolean;
+  chatUpstreamCostYuan?: number;
 };
 
 const kindOptions = [
@@ -1084,6 +1085,7 @@ function toFormValues(upstream: ConsoleUpstream): FormShape {
     supportsJsonMode: upstream.chatConfig?.supportsJsonMode,
     supportsTools: upstream.chatConfig?.supportsTools,
     supportsVisionInput: upstream.chatConfig?.supportsVisionInput,
+    chatUpstreamCostYuan: upstream.chatConfig?.upstreamCostYuan,
   };
   return {
     ...protocolDefaults(upstream.kind),
@@ -1181,6 +1183,9 @@ function toUpstream(values: FormShape, original?: ConsoleUpstream | null): Conso
       supportsJsonMode: Boolean(values.supportsJsonMode),
       supportsTools: Boolean(values.supportsTools),
       supportsVisionInput: Boolean(values.supportsVisionInput),
+      ...(values.chatUpstreamCostYuan === undefined || values.chatUpstreamCostYuan === null
+        ? {}
+        : { upstreamCostYuan: Math.max(0, Number(values.chatUpstreamCostYuan)) }),
     } : undefined,
     detectedConfig: original?.detectedConfig,
     manualOverrides: original?.manualOverrides,
@@ -1935,6 +1940,15 @@ export function UpstreamsPage({ catalog, saving, onSave, onDelete, onTest }: Ups
 
           {currentKind === 'chat_completions' ? (
             <Row gutter={16}>
+              <Col span={8}>
+                <Form.Item
+                  name="chatUpstreamCostYuan"
+                  label="上游固定成本（元 / 成功次）"
+                  extra="仅用于成本和毛利报表，不改变统一售价或租户实际扣费。"
+                >
+                  <InputNumber min={0} precision={5} step={0.00001} style={{ width: '100%' }} />
+                </Form.Item>
+              </Col>
               <Col span={8}><Form.Item name="supportsSystemPrompt" label="支持系统提示词" valuePropName="checked"><Switch /></Form.Item></Col>
               <Col span={8}><Form.Item name="supportsJsonMode" label="支持 JSON 模式" valuePropName="checked"><Switch /></Form.Item></Col>
               <Col span={8}><Form.Item name="supportsTools" label="支持工具调用" valuePropName="checked"><Switch /></Form.Item></Col>

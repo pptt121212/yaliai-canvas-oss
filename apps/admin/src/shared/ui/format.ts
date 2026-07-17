@@ -25,5 +25,11 @@ export function formatCredits(cents?: number | null): string {
   return `￥${(Number(cents || 0) / 100).toFixed(2)}`;
 }
 
+/** Report-only formatter. Financial balances and billing remain integer cents. */
+export function formatReportCostCredits(cents?: number | null): string {
+  const yuan = Number(cents || 0) / 100;
+  return `￥${yuan.toFixed(5)}`;
+}
+
 /** 空值统一显示为 em dash */
 export const EMPTY_DASH = DASH;

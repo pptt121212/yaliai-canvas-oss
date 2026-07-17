@@ -201,6 +201,7 @@ const chatConfigSchema = z.object({
   supportsJsonMode: z.boolean(),
   supportsTools: z.boolean(),
   supportsVisionInput: z.boolean(),
+  upstreamCostYuan: z.number().nonnegative().optional(),
 });
 const probeCheckSchema = z.object({
   key: z.string(),
@@ -1343,12 +1344,13 @@ function resolveConfiguredImageCost(
   };
 }
 
-function imageCostYuanToCredits(value: number) {
+function imageCostYuanToReportCredits(value: number) {
   const normalized = Number(value || 0);
   if (!Number.isFinite(normalized)) {
     return 0;
   }
-  return Math.max(0, Math.round(normalized * 100));
+  // Operational reports may use fractional cents. Accounting remains integer cents.
+  return Math.max(0, normalized * 100);
 }
 
 function computeEligibleSuccessRate(completedCount: number, eligibleRequestCount: number) {
@@ -1442,7 +1444,7 @@ async function buildChannelPerformanceReport(days: number) {
       const quality = normalizeCostQuality(row.quality);
       const resolved = resolveConfiguredImageCost(upstreamById.get(upstreamId), tier, quality);
       if (resolved.configured) {
-        estimatedUpstreamCostCredits += imageCostYuanToCredits(resolved.value) * row.unitCount;
+        estimatedUpstreamCostCredits += imageCostYuanToReportCredits(resolved.value) * row.unitCount;
         costedImageCount += row.unitCount;
       }
     }
@@ -1476,7 +1478,11 @@ async function buildChannelPerformanceReport(days: number) {
     const runtimeProvider = runtimeProviderById.get(upstreamId);
     const traces = summarizeTraceRows(textTraceRows.filter((item) => item.upstreamId === upstreamId));
     const billingRows = textBillingRows.filter((item) => item.upstreamId === upstreamId);
-    const unitCost = Math.max(0, Number(textPolicyByUpstreamId.get(upstreamId)?.pricing.chatUnit || 0));
+    const configuredCostYuan = Number(upstreamById.get(upstreamId)?.chatConfig?.upstreamCostYuan);
+    // chatUnit is the legacy per-channel cost in cents; keep it as a compatibility fallback.
+    const unitCost = Number.isFinite(configuredCostYuan)
+      ? Math.max(0, configuredCostYuan * 100)
+      : Math.max(0, Number(textPolicyByUpstreamId.get(upstreamId)?.pricing.chatUnit || 0));
     const billedUnitCount = billingRows.reduce((sum, item) => sum + Math.max(0, Number(item.unitCount || 0)), 0);
     const persistedUpstreamCostCredits = billingRows.reduce((sum, item) => (
       sum + Math.max(0, Number(item.upstreamUnitCostCredits || 0)) * Math.max(0, Number(item.unitCount || 0))
@@ -1552,7 +1558,7 @@ async function buildChannelPerformanceReport(days: number) {
     const quality = normalizeCostQuality(row.quality);
     const resolved = resolveConfiguredImageCost(upstreamById.get(row.upstreamId || ''), tier, quality);
     if (resolved.configured) {
-      result.estimatedUpstreamCostCredits += imageCostYuanToCredits(resolved.value) * row.unitCount;
+      result.estimatedUpstreamCostCredits += imageCostYuanToReportCredits(resolved.value) * row.unitCount;
       result.costedImageCount += row.unitCount;
     }
     result.generatedImageCount += row.unitCount;
@@ -1735,7 +1741,7 @@ function buildOperationalRollupTable(rows: Array<{
         const quality = normalizeCostQuality(row.quality);
         const resolved = resolveConfiguredImageCost(upstreamById.get(row.upstreamId || ''), tier, quality);
         if (resolved.configured) {
-          current.estimatedUpstreamCostCredits += imageCostYuanToCredits(resolved.value) * unitCount;
+          current.estimatedUpstreamCostCredits += imageCostYuanToReportCredits(resolved.value) * unitCount;
           current.costedImageCount += unitCount;
         }
       }

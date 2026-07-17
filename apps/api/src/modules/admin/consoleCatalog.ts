@@ -160,6 +160,7 @@ export type ChatCompletionsConfig = {
   supportsJsonMode: boolean;
   supportsTools: boolean;
   supportsVisionInput: boolean;
+  upstreamCostYuan?: number;
 };
 
 export type ConsoleUpstream = {
@@ -910,9 +911,11 @@ function normalizeResponsesConfig(input?: Partial<ResponsesEndpointConfig> | nul
 
 function normalizeChatConfig(input?: Partial<ChatCompletionsConfig> | null): ChatCompletionsConfig {
   const defaults = defaultChatConfig();
+  const upstreamCostYuan = Number(input?.upstreamCostYuan);
   return {
     ...defaults,
     ...(input || {}),
+    ...(Number.isFinite(upstreamCostYuan) ? { upstreamCostYuan: Math.max(0, upstreamCostYuan) } : {}),
   };
 }
 

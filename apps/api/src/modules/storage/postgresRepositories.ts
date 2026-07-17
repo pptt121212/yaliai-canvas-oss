@@ -799,6 +799,7 @@ function normalizeChannelPerformanceSnapshot(value: ChannelPerformanceData): Cha
         unitCount?: unknown;
         operation?: unknown;
         upstreamUnitCostCredits?: unknown;
+        upstreamUnitCostConfigured?: unknown;
       };
       const channelId = String(legacy.channelId || '');
       const operation = legacy.operation === 'edits' || legacy.operation === 'chat_completions'
@@ -810,6 +811,9 @@ function normalizeChannelPerformanceSnapshot(value: ChannelPerformanceData): Cha
         ...item,
         operation,
         unitCount: Math.max(0, Number(legacy.unitCount ?? legacy.imageCount ?? 0)),
+        upstreamUnitCostConfigured: legacy.upstreamUnitCostConfigured === undefined
+          ? Math.max(0, Number(legacy.upstreamUnitCostCredits || 0)) > 0
+          : Boolean(legacy.upstreamUnitCostConfigured),
         upstreamUnitCostCredits: Math.max(0, Number(legacy.upstreamUnitCostCredits || 0)),
       };
     }),
@@ -1690,9 +1694,15 @@ export function createPostgresOperationalRepository(
               operation,
               nullif(coalesce(detail ->> 'billedTier', detail ->> 'actualTier', detail ->> 'requestedTier', ''), '') as tier,
               nullif(coalesce(detail ->> 'billedQuality', ''), '') as quality,
+              (
+                coalesce(detail ->> 'upstreamCostYuan', '') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+                or coalesce(detail ->> 'upstreamCostCents', '') ~ '^-?[0-9]+$'
+              ) as upstream_unit_cost_configured,
               case
+                when coalesce(detail ->> 'upstreamCostYuan', '') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+                  then (detail ->> 'upstreamCostYuan')::numeric * 100
                 when coalesce(detail ->> 'upstreamCostCents', '') ~ '^-?[0-9]+$'
-                  then (detail ->> 'upstreamCostCents')::bigint
+                  then (detail ->> 'upstreamCostCents')::numeric
                 else 0
               end as upstream_unit_cost_credits,
               count(*)::bigint as unit_count,
@@ -1701,7 +1711,7 @@ export function createPostgresOperationalRepository(
             where created_at >= $1 and created_at < $2
               and status = 'charged'
               and not (coalesce(tenant_id, '') = any($3::text[]))
-            group by channel_id, upstream_id, operation, tier, quality, upstream_unit_cost_credits
+            group by channel_id, upstream_id, operation, tier, quality, upstream_unit_cost_configured, upstream_unit_cost_credits
           `,
           [fromInclusive, toExclusive, excludedTenants],
         ),
@@ -1782,6 +1792,7 @@ export function createPostgresOperationalRepository(
           tier: row.tier || undefined,
           quality: row.quality || undefined,
           unitCount: Number(row.unit_count || 0),
+          upstreamUnitCostConfigured: Boolean(row.upstream_unit_cost_configured),
           upstreamUnitCostCredits: Number(row.upstream_unit_cost_credits || 0),
           chargedCredits: Number(row.charged_credits || 0),
         })),

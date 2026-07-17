@@ -20,7 +20,7 @@ import type {
   OperationalRollupReport,
   OperationalRollupTableRow,
 } from '../../shared/types';
-import { PageHeader, StatStrip, StatusDot, formatCredits, formatDateTime } from '../../shared/ui';
+import { PageHeader, StatStrip, StatusDot, formatCredits, formatDateTime, formatReportCostCredits } from '../../shared/ui';
 
 const { Text } = Typography;
 
@@ -197,8 +197,8 @@ export function OperationalReportsPage({
           { label: '出图数', value: summary.generatedImageCount },
           { label: '聊天计费次数', value: summary.chatRequestCount },
           { label: '收益', value: formatCredits(summary.chargedCredits) },
-          { label: '成本估算', value: formatCredits(summary.estimatedUpstreamCostCredits) },
-          { label: '毛利估算', value: formatCredits(summary.estimatedGrossMarginCredits) },
+          { label: '成本估算', value: formatReportCostCredits(summary.estimatedUpstreamCostCredits) },
+          { label: '毛利估算', value: formatReportCostCredits(summary.estimatedGrossMarginCredits) },
           { label: '毛利率', value: percent(grossMarginRate) },
           { label: '成本覆盖', value: `图 ${summary.costedImageCount}/${summary.generatedImageCount} · 聊 ${summary.costedChatRequestCount}/${summary.chatRequestCount}` },
           { label: '平均成功耗时', value: formatMs(averageDurationMs) },
@@ -357,7 +357,7 @@ export function OperationalReportsPage({
               align: 'right',
               render: (value: number) => (
                 <span className={`tabular ${Number(value || 0) < 0 ? 'is-negative' : 'is-positive'}`}>
-                  {formatCredits(value)}
+                  {formatReportCostCredits(value)}
                 </span>
               ),
             },
