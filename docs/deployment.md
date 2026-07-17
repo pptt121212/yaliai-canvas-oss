@@ -102,27 +102,6 @@ pnpm --filter @yali/api build
 DATABASE_URL="$DATABASE_URL" PG_SCHEMA="$PG_SCHEMA" pnpm --filter @yali/api bootstrap:postgres
 ```
 
-### Upgrading From Cent-Based Billing
-
-Current releases store CNY as an integer number of `0.00001` yuan. This preserves exact balances, costs, revenue, and gross-margin calculations without floating point drift. Older releases stored these values as integer cents.
-
-For an existing installation, stop every API and worker process before starting the upgraded code. Build the new release, then run the idempotent migration once:
-
-```bash
-pm2 stop yali-canvas-api
-pm2 stop yali-canvas-worker
-pnpm --filter @yali/api build
-DATABASE_URL="$DATABASE_URL" PG_SCHEMA="$PG_SCHEMA" pnpm --filter @yali/api migrate:money-precision
-```
-
-The migration takes a PostgreSQL transaction advisory lock, multiplies existing cent-based ledger values by `1000` without changing their yuan value, upgrades image/chat cost history, converts legacy Chat provider costs to yuan configuration, and clears only derived operational report snapshots so they rebuild at the new scale. It is safe to rerun: after completion it reports that no migration was applied.
-
-Do not run old API processes after this migration. Start the new API and worker version together:
-
-```bash
-pm2 start deploy/api/ecosystem.config.cjs --update-env
-```
-
 Recommended application pool setting:
 
 - `PG_POOL_MAX=12` is the default pool size per Node.js process.

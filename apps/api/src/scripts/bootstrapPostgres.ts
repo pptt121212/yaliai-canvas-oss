@@ -77,8 +77,8 @@ async function ensureOperationalTables(pool: Pool, schema: string) {
       task_id text,
       operation text not null,
       currency text not null,
-      reserved_credits bigint not null,
-      charged_credits bigint not null,
+      reserved_credits integer not null,
+      charged_credits integer not null,
       status text not null,
       model text not null,
       size text,
@@ -104,7 +104,7 @@ async function ensureOperationalTables(pool: Pool, schema: string) {
       request_payload jsonb not null default '{}'::jsonb,
       response_payload jsonb,
       error_payload jsonb,
-      billed_credits bigint
+      billed_credits integer
     )
   `);
   await pool.query(`

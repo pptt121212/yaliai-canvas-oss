@@ -3,7 +3,6 @@ import type { ProviderConfig } from '@yali/provider-core';
 import type { AdminControlPlaneConfig } from '../admin/controlPlane.js';
 import type { AdminConsoleCatalog } from '../admin/consoleCatalog.js';
 import { notifyPostgresConfigChange } from './postgresConfigEvents.js';
-import { ensureCnyMoneyPrecisionReady } from './moneyPrecisionMigration.js';
 import type {
   AdminSessionRecord,
   AsyncCanvasUserRepository,
@@ -552,8 +551,8 @@ async function ensureOperationalTables(pool: Pool, schema: string) {
         task_id text,
         operation text not null,
         currency text not null,
-        reserved_credits bigint not null,
-        charged_credits bigint not null,
+        reserved_credits integer not null,
+        charged_credits integer not null,
         status text not null,
         model text not null,
         size text,
@@ -579,7 +578,7 @@ async function ensureOperationalTables(pool: Pool, schema: string) {
         request_payload jsonb not null default '{}'::jsonb,
         response_payload jsonb,
         error_payload jsonb,
-        billed_credits bigint
+        billed_credits integer
       )
     `);
     await pool.query(`
@@ -726,7 +725,6 @@ async function ensureOperationalTables(pool: Pool, schema: string) {
     await pool.query(`create index if not exists ${schema}_operational_rollup_jobs_locked_until_idx on ${schema}.operational_rollup_jobs (locked_until)`);
     await pool.query(`create index if not exists ${schema}_operational_outbox_events_ready_idx on ${schema}.operational_outbox_events (event_type, status, available_at, locked_until)`);
     await pool.query(`create index if not exists ${schema}_operational_outbox_events_updated_idx on ${schema}.operational_outbox_events (updated_at desc)`);
-    await ensureCnyMoneyPrecisionReady(pool, schema);
   });
 }
 

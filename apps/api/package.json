@@ -9,7 +9,6 @@
     "check": "tsc -b tsconfig.json",
     "start": "node dist/src/server.js",
     "bootstrap:postgres": "node dist/src/scripts/bootstrapPostgres.js",
-    "migrate:money-precision": "node dist/src/scripts/migrateMoneyPrecision.js",
     "rollup:operational": "node dist/src/scripts/buildOperationalRollups.js"
   },
   "dependencies": {

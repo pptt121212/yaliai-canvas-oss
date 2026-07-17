@@ -188,9 +188,7 @@ export type BillingLedgerRecord = {
   taskId?: string;
   operation: BillingLedgerOperation;
   currency: 'cny';
-  /** Legacy field name; integer 0.00001-yuan units. */
   reservedCredits: number;
-  /** Legacy field name; integer 0.00001-yuan units. */
   chargedCredits: number;
   status: BillingLedgerStatus;
   model: string;
@@ -218,9 +216,7 @@ export type TenantFinanceLedgerRecord = {
   tenantId: string;
   operatorId: string;
   direction: TenantFinanceLedgerDirection;
-  /** Legacy field name; integer 0.00001-yuan units. */
   amountCents: number;
-  /** Legacy field name; integer 0.00001-yuan units. */
   balanceAfterCents: number;
   currency: 'cny';
   note: string;
@@ -230,7 +226,6 @@ export type TenantFinanceLedgerRecord = {
 export type TenantFinanceBalanceRecord = {
   tenantId: string;
   currency: 'cny';
-  /** Legacy field names; integer 0.00001-yuan units. */
   balanceCents: number;
   totalCreditedCents: number;
   totalDebitedCents: number;

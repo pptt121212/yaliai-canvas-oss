@@ -22,9 +22,8 @@ export function formatDateTime(value?: number | null): string {
 
 /** 分 → ￥元，保留两位小数 */
 export function formatCredits(cents?: number | null): string {
-  return `￥${formatCnyMinorUnits(cents, { minimumFractionDigits: 2 })}`;
+  return `￥${(Number(cents || 0) / 100).toFixed(2)}`;
 }
 
 /** 空值统一显示为 em dash */
 export const EMPTY_DASH = DASH;
-import { formatCnyMinorUnits } from '@yali/billing-core';
