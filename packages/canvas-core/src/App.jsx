@@ -1447,6 +1447,9 @@ function createApiKeySettingsState(config) {
   return {
     imageRoutingMode: String(settings.imageRoutingMode || 'smart_failover').trim() || 'smart_failover',
     fixedImageProviderId: String(settings.fixedImageProviderId || '').trim(),
+    fixedImageProviderIds: Array.isArray(settings.fixedImageProviderIds)
+      ? settings.fixedImageProviderIds.map((item) => String(item || '').trim()).filter(Boolean)
+      : [],
     fixedImageProviderName: String(settings.fixedImageProviderName || '').trim(),
     fixedImageFlatPrice: Math.max(0, Number(settings.fixedImageFlatPrice || 0)),
     maxImageQuality: String(settings.maxImageQuality || 'high').trim() || 'high',

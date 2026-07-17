@@ -243,6 +243,7 @@ export type ConsoleApiKey = {
   maxConcurrency: number;
   imageRoutingMode?: 'smart_priority' | 'smart_failover' | 'fixed_provider';
   fixedImageProviderId?: string;
+  fixedImageProviderIds?: string[];
   fixedImageFlatPrice?: number;
   maxImageQuality?: ImageQualityCap;
   maskedKey: string;
@@ -1423,6 +1424,18 @@ function deriveSeedCatalog(): AdminConsoleCatalog {
   };
 }
 
+function normalizeFixedImageProviderIds(input: unknown, legacyValue?: unknown) {
+  const values = Array.isArray(input) ? input : [];
+  const normalized = values
+    .map((item) => String(item || '').trim())
+    .filter(Boolean);
+  const legacyId = String(legacyValue || '').trim();
+  if (legacyId && !normalized.includes(legacyId)) {
+    normalized.unshift(legacyId);
+  }
+  return Array.from(new Set(normalized));
+}
+
 function normalizeCatalog(raw: unknown): AdminConsoleCatalog {
   if (!raw || typeof raw !== 'object') {
     return deriveSeedCatalog();
@@ -1493,7 +1506,12 @@ function normalizeCatalog(raw: unknown): AdminConsoleCatalog {
       requestLimitPerMinute: Number(item.requestLimitPerMinute || 120),
       notes: String(item.notes || ''),
     })),
-    apiKeys: (apiKeys as Record<string, unknown>[]).map((item, index) => ({
+    apiKeys: (apiKeys as Record<string, unknown>[]).map((item, index) => {
+      const fixedImageProviderIds = normalizeFixedImageProviderIds(
+        item.fixedImageProviderIds,
+        item.fixedImageProviderId,
+      );
+      return {
       id: String(item.id || randomId(`key_${index}`)),
       name: String(item.name || `Key ${index + 1}`),
       tenantId: String(item.tenantId || ''),
@@ -1506,14 +1524,16 @@ function normalizeCatalog(raw: unknown): AdminConsoleCatalog {
         || item.imageRoutingMode === 'fixed_provider'
         ? item.imageRoutingMode
         : undefined,
-      fixedImageProviderId: String(item.fixedImageProviderId || ''),
+      fixedImageProviderId: fixedImageProviderIds[0] || '',
+      fixedImageProviderIds,
       fixedImageFlatPrice: Math.max(0, Number(item.fixedImageFlatPrice || 0)),
       maxImageQuality: normalizeImageQualityCap(item.maxImageQuality),
       maskedKey: String(item.maskedKey || ''),
       rawKey: String(item.rawKey || ''),
       keyHash: String(item.keyHash || ''),
       notes: String(item.notes || ''),
-    })),
+      };
+    }),
     imagePricingMatrix: normalizeImagePricingMatrix(source.imagePricingMatrix),
     chatCompletionsUnitPrice: Math.max(0, Number(source.chatCompletionsUnitPrice || 0)),
     systemPolicy: (source.systemPolicy as ConsoleSystemPolicy) || defaultSystemPolicy(),

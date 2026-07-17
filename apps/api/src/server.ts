@@ -800,6 +800,7 @@ type RequestAccessContext = {
   authMode: 'tenant_key' | 'admin_managed' | 'user_supplied';
   imageRoutingMode?: ImageRoutingMode;
   fixedImageProviderId?: string;
+  fixedImageProviderIds?: string[];
   fixedImageFlatPrice?: number;
   maxImageQuality?: ImageQualityCap;
   maxConcurrency?: number;
@@ -3512,8 +3513,11 @@ async function resolveRequestAccessContext(
           authMode: 'tenant_key',
           imageRoutingMode: apiKey.imageRoutingMode || 'smart_failover',
           fixedImageProviderId: apiKey.imageRoutingMode === 'fixed_provider'
-            ? String(apiKey.fixedImageProviderId || '').trim()
+            ? normalizeFixedImageProviderIds(apiKey.fixedImageProviderIds, apiKey.fixedImageProviderId)[0] || ''
             : '',
+          fixedImageProviderIds: apiKey.imageRoutingMode === 'fixed_provider'
+            ? normalizeFixedImageProviderIds(apiKey.fixedImageProviderIds, apiKey.fixedImageProviderId)
+            : [],
           fixedImageFlatPrice: apiKey.imageRoutingMode === 'fixed_provider'
             ? Math.max(0, Number(apiKey.fixedImageFlatPrice || 0))
             : 0,
@@ -3654,8 +3658,11 @@ async function resolveRequestAccessContext(
       authMode: 'tenant_key',
       imageRoutingMode: apiKey.imageRoutingMode || 'smart_failover',
       fixedImageProviderId: apiKey.imageRoutingMode === 'fixed_provider'
-        ? String(apiKey.fixedImageProviderId || '').trim()
+        ? normalizeFixedImageProviderIds(apiKey.fixedImageProviderIds, apiKey.fixedImageProviderId)[0] || ''
         : '',
+      fixedImageProviderIds: apiKey.imageRoutingMode === 'fixed_provider'
+        ? normalizeFixedImageProviderIds(apiKey.fixedImageProviderIds, apiKey.fixedImageProviderId)
+        : [],
       fixedImageFlatPrice: apiKey.imageRoutingMode === 'fixed_provider'
         ? Math.max(0, Number(apiKey.fixedImageFlatPrice || 0))
         : 0,
@@ -3689,7 +3696,7 @@ function resolveRequestedImageTier(payload: z.infer<typeof openAIImagesSchema>):
   return classifyResolutionTier(requestedSize || '') || undefined;
 }
 
-type EffectiveRoutingMode = ImageRoutingMode;
+type EffectiveRoutingMode = ImageRoutingMode | 'fixed_provider_pool';
 
 type RoutedImageExecutionCandidate = {
   provider: ProviderConfig;
@@ -3758,6 +3765,13 @@ function resolveEffectiveImageRoutingMode(input: {
     return mode === 'fixed_provider' ? 'smart_failover' : mode;
   }
   if (input.accessContext.authMode === 'tenant_key') {
+    if (input.accessContext.imageRoutingMode === 'fixed_provider') {
+      const fixedProviderIds = normalizeFixedImageProviderIds(
+        input.accessContext.fixedImageProviderIds,
+        input.accessContext.fixedImageProviderId,
+      );
+      return fixedProviderIds.length > 1 ? 'fixed_provider_pool' : 'fixed_provider';
+    }
     return input.accessContext.imageRoutingMode || 'smart_failover';
   }
   if (input.payload.routing_mode === 'smart_priority' || input.payload.routing_mode === 'smart_failover') {
@@ -3777,7 +3791,20 @@ function canRetrySoleProvider(mode: EffectiveRoutingMode, candidateCount: number
     mode === 'smart_failover'
     || mode === 'smart_priority'
     || mode === 'fixed_provider'
+    || mode === 'fixed_provider_pool'
   );
+}
+
+function normalizeFixedImageProviderIds(value?: unknown, legacyValue?: unknown) {
+  const values = Array.isArray(value) ? value : [];
+  const normalized = values
+    .map((item) => String(item || '').trim())
+    .filter(Boolean);
+  const legacyId = String(legacyValue || '').trim();
+  if (legacyId && !normalized.includes(legacyId)) {
+    normalized.unshift(legacyId);
+  }
+  return Array.from(new Set(normalized));
 }
 
 function isSameProviderRetryableFailure(failure: { category: string; shouldFailover: boolean }) {
@@ -4962,18 +4989,27 @@ async function buildSmartExecutionPreview(input: {
   }
 
   const channelProviders = resolveEnabledImageProvidersForOperation(input.operation);
-  const fixedProviderId = String(input.accessContext.fixedImageProviderId || '').trim();
-  const providers = mode === 'fixed_provider'
-    ? channelProviders.filter((provider) => provider.providerId === fixedProviderId)
+  const isFixedProviderRoute = mode === 'fixed_provider' || mode === 'fixed_provider_pool';
+  const fixedProviderIds = normalizeFixedImageProviderIds(
+    input.accessContext.fixedImageProviderIds,
+    input.accessContext.fixedImageProviderId,
+  );
+  const fixedProviderIdSet = new Set(fixedProviderIds);
+  const providers = isFixedProviderRoute
+    ? channelProviders.filter((provider) => fixedProviderIdSet.has(provider.providerId))
     : channelProviders;
-  const fixedProviderFilteredOut = mode === 'fixed_provider'
+  const fixedProviderFilteredOut = isFixedProviderRoute
     ? channelProviders
-      .filter((provider) => provider.providerId !== fixedProviderId)
-      .map((provider) => ({ providerId: provider.providerId, reason: 'not_fixed_provider' }))
+      .filter((provider) => !fixedProviderIdSet.has(provider.providerId))
+      .map((provider) => ({
+        providerId: provider.providerId,
+        reason: mode === 'fixed_provider_pool' ? 'not_fixed_provider_pool' : 'not_fixed_provider',
+      }))
     : [];
+  const routingPlanMode: ImageRoutingMode = mode === 'fixed_provider_pool' ? 'smart_failover' : mode;
   const plan = await buildSmartImageRoutingPlan({
     providers,
-    mode,
+    mode: routingPlanMode,
     context: {
       operation: input.operation,
       requestedSize: resolveRequestedImageSize(payload),
@@ -4983,7 +5019,7 @@ async function buildSmartExecutionPreview(input: {
       requestMode: payload.async ? 'async' : 'sync',
       hasReferenceImage: payloadHasReferenceImages(payload),
       requestedModel: payload.model,
-      ignoreTierQualityCapability: mode === 'fixed_provider',
+      ignoreTierQualityCapability: isFixedProviderRoute,
       ignoreRuntimeBlock: mode === 'fixed_provider',
     },
   });
@@ -5009,7 +5045,7 @@ async function buildSmartExecutionPreview(input: {
         reasons: candidate.reasons,
       });
     } catch (error) {
-      if (mode !== 'smart_failover' || isTerminalPayloadPreparationError(error)) {
+      if ((mode !== 'smart_failover' && mode !== 'fixed_provider_pool') || isTerminalPayloadPreparationError(error)) {
         throw error;
       }
       adaptationFilteredOut.push({
@@ -5160,7 +5196,10 @@ function resolveFixedApiKeyImageSellPriceCents(accessContext?: RequestAccessCont
   if (accessContext.imageRoutingMode !== 'fixed_provider') {
     return 0;
   }
-  if (!String(accessContext.fixedImageProviderId || '').trim()) {
+  if (!normalizeFixedImageProviderIds(
+    accessContext.fixedImageProviderIds,
+    accessContext.fixedImageProviderId,
+  ).length) {
     return 0;
   }
   const flatPrice = Number(accessContext.fixedImageFlatPrice || 0);
@@ -7886,8 +7925,11 @@ app.get('/v1/canvas/session', async (request, reply) => {
       apiKeySettings: {
         imageRoutingMode: apiKey?.imageRoutingMode || 'smart_failover',
         fixedImageProviderId: apiKey?.imageRoutingMode === 'fixed_provider'
-          ? String(apiKey?.fixedImageProviderId || '').trim()
+          ? normalizeFixedImageProviderIds(apiKey.fixedImageProviderIds, apiKey.fixedImageProviderId)[0] || ''
           : '',
+        fixedImageProviderIds: apiKey?.imageRoutingMode === 'fixed_provider'
+          ? normalizeFixedImageProviderIds(apiKey.fixedImageProviderIds, apiKey.fixedImageProviderId)
+          : [],
         fixedImageProviderName: apiKey?.imageRoutingMode === 'fixed_provider'
           ? '平台固定线路'
           : '',

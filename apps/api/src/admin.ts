@@ -458,21 +458,28 @@ async function buildRoutingDiagnosticsPayload() {
       fixedModeCount,
       diagnosticsWindowMinutes: Math.round(routingDiagnosticsWindowMs / 60000),
     },
-    apiKeyModes: apiKeys.map((item) => ({
-      apiKeyId: item.id,
-      apiKeyName: item.name,
-      tenantId: item.tenantId,
-      tenantName: catalog.tenants.find((tenant) => tenant.id === item.tenantId)?.name || item.tenantId,
-      mode: item.imageRoutingMode || 'smart_failover',
-      modeLabel: smartRoutingModeLabel(item.imageRoutingMode || 'smart_failover'),
-      fixedProviderId: item.fixedImageProviderId || '',
-      fixedProviderName: item.fixedImageProviderId
-        ? upstreamNameById.get(item.fixedImageProviderId) || item.fixedImageProviderId
-        : '',
-      status: item.status,
-      maxConcurrency: item.maxConcurrency,
-      requestLimitPerMinute: item.requestLimitPerMinute,
-    })),
+    apiKeyModes: apiKeys.map((item) => {
+      const fixedProviderIds = Array.from(new Set([
+        ...(Array.isArray(item.fixedImageProviderIds) ? item.fixedImageProviderIds : []),
+        item.fixedImageProviderId || '',
+      ].map((providerId) => String(providerId || '').trim()).filter(Boolean)));
+      return {
+        apiKeyId: item.id,
+        apiKeyName: item.name,
+        tenantId: item.tenantId,
+        tenantName: catalog.tenants.find((tenant) => tenant.id === item.tenantId)?.name || item.tenantId,
+        mode: item.imageRoutingMode || 'smart_failover',
+        modeLabel: smartRoutingModeLabel(item.imageRoutingMode || 'smart_failover'),
+        fixedProviderId: fixedProviderIds[0] || '',
+        fixedProviderIds,
+        fixedProviderName: fixedProviderIds
+          .map((providerId) => upstreamNameById.get(providerId) || providerId)
+          .join('、'),
+        status: item.status,
+        maxConcurrency: item.maxConcurrency,
+        requestLimitPerMinute: item.requestLimitPerMinute,
+      };
+    }),
     providers: providers.map((provider) => {
       const runtime = (provider.metadata?.runtime && typeof provider.metadata.runtime === 'object')
         ? provider.metadata.runtime as Record<string, unknown>
@@ -612,6 +619,7 @@ const consoleApiKeySchema = z.object({
   maxConcurrency: z.number().int().positive(),
   imageRoutingMode: imageRoutingModeSchema.optional(),
   fixedImageProviderId: z.string().optional(),
+  fixedImageProviderIds: z.array(z.string()).optional(),
   fixedImageFlatPrice: z.number().nonnegative().optional(),
   maxImageQuality: imageQualityCapSchema.optional(),
   maskedKey: z.string().min(1),
@@ -2552,7 +2560,44 @@ export async function registerAdminRoutes(app: FastifyInstance) {
 
   app.post('/v1/admin/catalog/api-keys', async (request, reply) => {
     requireAdmin(request, reply);
-    const body = consoleApiKeySchema.parse(request.body);
+    const parsed = consoleApiKeySchema.parse(request.body);
+    const fixedImageProviderIds = Array.from(new Set([
+      ...(Array.isArray(parsed.fixedImageProviderIds) ? parsed.fixedImageProviderIds : []),
+      parsed.fixedImageProviderId || '',
+    ].map((providerId) => String(providerId || '').trim()).filter(Boolean)));
+    const body = parsed.imageRoutingMode === 'fixed_provider'
+      ? {
+          ...parsed,
+          fixedImageProviderId: fixedImageProviderIds[0] || '',
+          fixedImageProviderIds,
+        }
+      : {
+          ...parsed,
+          fixedImageProviderId: '',
+          fixedImageProviderIds: [],
+          fixedImageFlatPrice: 0,
+        };
+    if (body.imageRoutingMode === 'fixed_provider') {
+      if (!fixedImageProviderIds.length) {
+        reply.code(400);
+        return { error: 'fixed_provider_pool_required', message: '固定线路模式至少需要选择一条线路。' };
+      }
+      const catalog = await adminConsoleCatalogStore.refreshAsync();
+      const imageChannel = catalog.channels.find((item) => item.id === 'channel_image_generation');
+      const validProviderIds = new Set((catalog.upstreams || [])
+        .filter((item) => imageChannel?.upstreamIds.includes(item.id))
+        .filter((item) => item.kind === 'images_endpoint' || item.kind === 'responses_endpoint')
+        .map((item) => item.id));
+      const invalidProviderIds = fixedImageProviderIds.filter((providerId) => !validProviderIds.has(providerId));
+      if (invalidProviderIds.length) {
+        reply.code(400);
+        return {
+          error: 'invalid_fixed_provider_pool',
+          message: '固定线路池只能选择当前图像业务通道中已配置的图像线路。',
+          invalidProviderIds,
+        };
+      }
+    }
     return adminConsoleCatalogStore.saveApiKeyAsync(body);
   });
 

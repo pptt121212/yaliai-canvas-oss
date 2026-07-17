@@ -476,6 +476,7 @@ export type RoutingDiagnosticsApiKeyMode = {
   mode: 'smart_priority' | 'smart_failover' | 'fixed_provider';
   modeLabel: string;
   fixedProviderId?: string;
+  fixedProviderIds?: string[];
   fixedProviderName?: string;
   status: 'active' | 'disabled';
   maxConcurrency: number;
@@ -875,6 +876,7 @@ export type ConsoleApiKey = {
   maxConcurrency: number;
   imageRoutingMode?: 'smart_priority' | 'smart_failover' | 'fixed_provider';
   fixedImageProviderId?: string;
+  fixedImageProviderIds?: string[];
   fixedImageFlatPrice?: number;
   maxImageQuality?: ImageQualityCap;
   maskedKey: string;

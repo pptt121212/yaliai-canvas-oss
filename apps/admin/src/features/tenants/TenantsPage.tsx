@@ -58,6 +58,7 @@ type ApiKeyFormValues = {
   maxConcurrency: number;
   imageRoutingMode: 'smart_priority' | 'smart_failover' | 'fixed_provider';
   fixedImageProviderId: string;
+  fixedImageProviderIds: string[];
   fixedImageFlatPrice: number;
   maxImageQuality: 'auto' | 'low' | 'medium' | 'high';
   maskedKey: string;
@@ -101,6 +102,7 @@ function createApiKeyDefaults(secret?: { raw: string; masked: string; hash: stri
     maxConcurrency: 10,
     imageRoutingMode: 'smart_failover',
     fixedImageProviderId: '',
+    fixedImageProviderIds: [],
     fixedImageFlatPrice: 0,
     maxImageQuality: 'high',
     maskedKey: secret?.masked || '',
@@ -132,6 +134,10 @@ function apiKeyToForm(apiKey: ConsoleApiKey): ApiKeyFormValues {
     maxConcurrency: apiKey.maxConcurrency,
     imageRoutingMode: apiKey.imageRoutingMode || 'smart_failover',
     fixedImageProviderId: apiKey.fixedImageProviderId || '',
+    fixedImageProviderIds: Array.from(new Set([
+      ...(Array.isArray(apiKey.fixedImageProviderIds) ? apiKey.fixedImageProviderIds : []),
+      apiKey.fixedImageProviderId || '',
+    ].map((item) => String(item || '').trim()).filter(Boolean))),
     fixedImageFlatPrice: Math.max(0, Number(apiKey.fixedImageFlatPrice || 0)),
     maxImageQuality: apiKey.maxImageQuality || 'high',
     maskedKey: apiKey.maskedKey,
@@ -262,7 +268,7 @@ export function TenantsPage({
     .map((item) => ({ value: item.id, label: `${item.name}（${item.id}）` }));
   const endpoints = apiEndpoints();
   const watchedImageRoutingMode = Form.useWatch('imageRoutingMode', apiKeyForm);
-  const watchedFixedImageProviderId = Form.useWatch('fixedImageProviderId', apiKeyForm);
+  const watchedFixedImageProviderIds = Form.useWatch('fixedImageProviderIds', apiKeyForm);
 
   useEffect(() => {
     if (!tenantDrawerOpen) {
@@ -358,6 +364,9 @@ export function TenantsPage({
       return;
     }
     const values = await apiKeyForm.validateFields();
+    const fixedImageProviderIds = values.imageRoutingMode === 'fixed_provider'
+      ? Array.from(new Set((values.fixedImageProviderIds || []).map((item) => String(item || '').trim()).filter(Boolean)))
+      : [];
     const apiKey: ConsoleApiKey = {
       id: values.id || editingApiKey?.id || `key_${Date.now()}`,
       name: values.name,
@@ -368,8 +377,9 @@ export function TenantsPage({
       maxConcurrency: Math.max(1, Number(values.maxConcurrency || 1)),
       imageRoutingMode: values.imageRoutingMode || 'smart_failover',
       fixedImageProviderId: values.imageRoutingMode === 'fixed_provider'
-        ? String(values.fixedImageProviderId || '').trim()
+        ? fixedImageProviderIds[0] || ''
         : '',
+      fixedImageProviderIds,
       fixedImageFlatPrice: values.imageRoutingMode === 'fixed_provider'
         ? Math.max(0, Number(values.fixedImageFlatPrice || 0))
         : 0,
@@ -630,7 +640,12 @@ export function TenantsPage({
                             {record.imageRoutingMode === 'fixed_provider' ? (
                               <>
                                 <Text type="secondary" style={{ fontSize: 12 }}>
-                                  {fixedImageProviderOptions.find((item) => item.value === record.fixedImageProviderId)?.label || record.fixedImageProviderId || '未配置固定线路'}
+                                  {(record.fixedImageProviderIds?.length
+                                    ? record.fixedImageProviderIds
+                                    : [record.fixedImageProviderId || '']
+                                  ).filter(Boolean).map((providerId) => (
+                                    fixedImageProviderOptions.find((item) => item.value === providerId)?.label || providerId
+                                  )).join('、') || '未配置固定线路'}
                                 </Text>
                                 <Text type="secondary" style={{ fontSize: 12 }}>
                                   {Number(record.fixedImageFlatPrice || 0) > 0
@@ -857,15 +872,16 @@ export function TenantsPage({
               {watchedImageRoutingMode === 'fixed_provider' ? (
                 <>
                   <Form.Item
-                    name="fixedImageProviderId"
-                    label="固定线路"
-                    rules={[{ required: true, message: '请选择固定线路' }]}
-                    extra="固定模式只会请求这里选择的线路；该线路仍必须在业务通道中启用，并满足当前请求能力要求。"
+                    name="fixedImageProviderIds"
+                    label="固定线路池"
+                    rules={[{ required: true, type: 'array', min: 1, message: '请至少选择一条固定线路' }]}
+                    extra="仅会在这里选择的线路中进行智能排序与回退，不会使用池外线路。单选保持原有固定线路重试行为；多选时优先选择综合健康、速度和成本最优的线路。"
                   >
                     <Select
+                      mode="multiple"
                       showSearch
                       optionFilterProp="label"
-                      placeholder="选择业务通道中的图像线路"
+                      placeholder="选择业务通道中的一条或多条图像线路"
                       options={fixedImageProviderOptions}
                     />
                   </Form.Item>
@@ -879,8 +895,8 @@ export function TenantsPage({
                       min={0}
                       step={0.001}
                       precision={4}
-                      disabled={!String(watchedFixedImageProviderId || '').trim()}
-                      placeholder={String(watchedFixedImageProviderId || '').trim() ? '输入一口价' : '先选择固定线路'}
+                      disabled={!Array.isArray(watchedFixedImageProviderIds) || !watchedFixedImageProviderIds.length}
+                      placeholder={Array.isArray(watchedFixedImageProviderIds) && watchedFixedImageProviderIds.length ? '输入固定线路池一口价' : '先选择固定线路池'}
                       style={{ width: '100%' }}
                     />
                   </Form.Item>
