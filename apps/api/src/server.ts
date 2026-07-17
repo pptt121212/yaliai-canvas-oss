@@ -1979,6 +1979,9 @@ function listCanvasUserApiKeys(apiKeys: ConsoleApiKey[], user: CanvasUserRecord)
 }
 
 function buildCanvasUserApiKeyPayload(apiKey: ConsoleApiKey, defaultApiKeyId?: string) {
+  const fixedImageFlatPrice = apiKey.imageRoutingMode === 'fixed_provider'
+    ? Math.max(0, Number(apiKey.fixedImageFlatPrice || 0))
+    : 0;
   return {
     id: apiKey.id,
     name: apiKey.name,
@@ -1986,6 +1989,8 @@ function buildCanvasUserApiKeyPayload(apiKey: ConsoleApiKey, defaultApiKeyId?: s
     maskedKey: apiKey.maskedKey,
     rawKey: apiKey.rawKey || '',
     isDefault: apiKey.id === defaultApiKeyId,
+    imagePricingMode: fixedImageFlatPrice > 0 ? 'fixed_flat' : 'pricing_matrix',
+    fixedImageFlatPrice,
   };
 }
 

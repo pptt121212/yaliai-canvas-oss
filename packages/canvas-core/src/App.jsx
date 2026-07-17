@@ -1744,6 +1744,8 @@ export default function App() {
             maskedKey: String(item?.maskedKey || '').trim(),
             rawKey: String(item?.rawKey || '').trim(),
             isDefault: Boolean(item?.isDefault),
+            imagePricingMode: String(item?.imagePricingMode || 'pricing_matrix').trim(),
+            fixedImageFlatPrice: Math.max(0, Number(item?.fixedImageFlatPrice || 0)),
           })).filter((item) => item.id)
         : [];
       setApiKeyListState({
@@ -4985,29 +4987,38 @@ export default function App() {
                       {apiKeyListState.error ? <div className="canvas-user-inline-note is-error"><span>{apiKeyListState.error}</span></div> : null}
                       <div className="canvas-user-key-list">
                         {canvasUserApiKeys.map((apiKey) => (
-                          <article key={apiKey.id} className={`canvas-user-key-item ${apiKey.isDefault ? 'is-default' : ''}`}>
-                            <div className="canvas-user-key-item-head">
-                              <div>
-                                <strong>{apiKey.name}</strong>
-                                <span>{apiKey.id}</span>
-                              </div>
-                              <div className="canvas-user-key-badges">
-                                {apiKey.isDefault ? <b>画布默认</b> : null}
-                                <em className={apiKey.status === 'active' ? 'is-active' : ''}>{apiKey.status === 'active' ? '可用' : '已停用'}</em>
-                              </div>
-                            </div>
-                            <code>{apiKey.rawKey || apiKey.maskedKey || '未保存完整密钥'}</code>
-                            <div className="canvas-user-actions">
-                              <button type="button" className="tool-pill" onClick={() => void handleCopyCanvasUserApiKey(apiKey)} disabled={userActionPending || !apiKey.rawKey}>
-                                <span>复制密钥</span>
-                              </button>
-                              {!apiKey.isDefault ? (
-                                <button type="button" className="tool-pill" onClick={() => void handleSetCanvasDefaultApiKey(apiKey)} disabled={userActionPending || apiKey.status !== 'active' || !apiKey.rawKey}>
-                                  <span>设为画布默认</span>
-                                </button>
-                              ) : null}
-                            </div>
-                          </article>
+                          (() => {
+                            const fixedImageFlatPrice = Math.max(0, Number(apiKey.fixedImageFlatPrice || 0));
+                            const imagePricingLabel = apiKey.imagePricingMode === 'fixed_flat' && fixedImageFlatPrice > 0
+                              ? `图像 ${formatFinanceAmountYuan(fixedImageFlatPrice)} / 张`
+                              : '图像按价格表';
+                            return (
+                              <article key={apiKey.id} className={`canvas-user-key-item ${apiKey.isDefault ? 'is-default' : ''}`}>
+                                <div className="canvas-user-key-item-head">
+                                  <div>
+                                    <strong>{apiKey.name}</strong>
+                                    <span>{apiKey.id}</span>
+                                  </div>
+                                  <div className="canvas-user-key-badges">
+                                    <em className="is-billing">{imagePricingLabel}</em>
+                                    {apiKey.isDefault ? <b>画布默认</b> : null}
+                                    <em className={apiKey.status === 'active' ? 'is-active' : ''}>{apiKey.status === 'active' ? '可用' : '已停用'}</em>
+                                  </div>
+                                </div>
+                                <code>{apiKey.rawKey || apiKey.maskedKey || '未保存完整密钥'}</code>
+                                <div className="canvas-user-actions">
+                                  <button type="button" className="tool-pill" onClick={() => void handleCopyCanvasUserApiKey(apiKey)} disabled={userActionPending || !apiKey.rawKey}>
+                                    <span>复制密钥</span>
+                                  </button>
+                                  {!apiKey.isDefault ? (
+                                    <button type="button" className="tool-pill" onClick={() => void handleSetCanvasDefaultApiKey(apiKey)} disabled={userActionPending || apiKey.status !== 'active' || !apiKey.rawKey}>
+                                      <span>设为画布默认</span>
+                                    </button>
+                                  ) : null}
+                                </div>
+                              </article>
+                            );
+                          })()
                         ))}
                         {!apiKeyListState.loading && !canvasUserApiKeys.length ? <span className="canvas-user-key-list-empty">当前账户还没有可展示的 API 密钥。</span> : null}
                         {apiKeyListState.loading ? <span className="canvas-user-key-list-empty">正在同步账户密钥…</span> : null}

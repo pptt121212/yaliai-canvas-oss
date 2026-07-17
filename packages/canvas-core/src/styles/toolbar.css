@@ -719,6 +719,11 @@
   color: #0f766e;
 }
 
+.canvas-user-key-badges em.is-billing {
+  background: #fff7ed;
+  color: #c2410c;
+}
+
 .canvas-user-endpoints {
   display: grid;
   gap: 6px;
