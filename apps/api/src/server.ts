@@ -2601,8 +2601,12 @@ async function executeUpstreamImageRequest(input: {
           }),
         };
         // This 429 is emitted by our own concurrency guard before an upstream
-        // request exists. Retrying the same saturated provider cannot help.
-        if (retrySoleProvider || shouldStopAfterFirstProviderAttempt(preview.mode)) {
+        // request exists, so it must not affect provider health. A short retry
+        // can still succeed when an in-flight request releases its slot.
+        if (shouldRetryCurrentSoleProvider(failure)) {
+          continue;
+        }
+        if (shouldStopAfterFirstProviderAttempt(preview.mode)) {
           return lastResult;
         }
         continue;
