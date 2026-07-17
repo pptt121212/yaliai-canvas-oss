@@ -429,6 +429,7 @@ async function buildRoutingDiagnosticsPayload() {
           healthScore: Number(candidate.healthScore.toFixed(2)),
           concurrencyScore: Number(candidate.concurrencyScore.toFixed(2)),
           price: candidate.price,
+          costSource: candidate.costSource,
           estimatedLatencyMs: Math.round(candidate.estimatedLatencyMs),
           observedLatencyMs: candidate.observedLatencyMs
             ? Math.round(candidate.observedLatencyMs)

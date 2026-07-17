@@ -501,6 +501,7 @@ export type RoutingDiagnosticsPreviewPlan = {
     healthScore: number;
     concurrencyScore: number;
     price: number;
+    costSource: 'exact' | 'highest_configured_fallback' | 'unconfigured';
     estimatedLatencyMs: number;
     observedLatencyMs?: number;
     latencySource: 'success_ewma' | 'legacy_ewma' | 'candidate_median';

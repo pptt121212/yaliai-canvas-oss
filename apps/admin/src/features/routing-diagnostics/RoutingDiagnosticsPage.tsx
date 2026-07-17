@@ -123,7 +123,13 @@ function formatScore(value: number) {
 
 function formatPrice(value: number) {
   const price = Number(value || 0);
-  return price > 0 ? price.toFixed(4) : EMPTY_DASH;
+  return price > 0 ? price.toFixed(5) : EMPTY_DASH;
+}
+
+function costSourceLabel(source?: RoutingCandidate['costSource']) {
+  if (source === 'highest_configured_fallback') return '最高已启用成本';
+  if (source === 'exact') return '当前规格成本';
+  return '未配置成本';
 }
 
 function formatDuration(value?: number) {
@@ -213,7 +219,14 @@ function renderPlanTable(plan: RoutingDiagnosticsPreviewPlan) {
           dataIndex: 'price',
           width: 104,
           align: 'right',
-          render: (value: number) => <span className="tabular">{formatPrice(value)}</span>,
+          render: (value: number, record?: RoutingCandidate) => (
+            <Space direction="vertical" size={0} align="end">
+              <span className="tabular">{formatPrice(value)}</span>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {costSourceLabel(record?.costSource)}
+              </Text>
+            </Space>
+          ),
         },
         {
           title: '预计成功出图',

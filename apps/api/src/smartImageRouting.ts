@@ -46,6 +46,7 @@ export type SmartImageRoutingCandidate = {
   healthScore: number;
   concurrencyScore: number;
   price: number;
+  costSource: 'exact' | 'highest_configured_fallback' | 'unconfigured';
   costMedian: number;
   effectiveCost: number;
   costIndex: number;
@@ -235,15 +236,69 @@ function providerCapabilityCost(
     }
     return String((item as Record<string, unknown>).tier || '') === requestedTier;
   });
-  if (!matched || typeof matched !== 'object') {
-    return 0;
+  const readCost = (profile: unknown) => {
+    if (!profile || typeof profile !== 'object') {
+      return null;
+    }
+    const record = profile as Record<string, unknown>;
+    const qualities = Array.isArray(record.qualities) ? record.qualities : [];
+    if (!qualities.includes(quality)) {
+      return null;
+    }
+    const costs = record.costs;
+    if (!costs || typeof costs !== 'object') {
+      return null;
+    }
+    if ((costs as Record<string, unknown>)[quality] === undefined) {
+      return null;
+    }
+    const value = Number((costs as Record<string, unknown>)[quality]);
+    return Number.isFinite(value) ? Math.max(0, value) : null;
+  };
+
+  const exactCost = readCost(matched);
+  if (exactCost !== null) {
+    return { value: exactCost, source: 'exact' as const };
   }
-  const costs = (matched as Record<string, unknown>).costs;
-  if (!costs || typeof costs !== 'object') {
-    return 0;
+
+  const tierRank: Record<string, number> = { auto: 0, '1k': 1, '2k': 2, '4k': 3 };
+  const qualityRank: Record<string, number> = { auto: 0, low: 1, medium: 2, high: 3 };
+  let highest: { value: number; tierRank: number; qualityRank: number } | null = null;
+  for (const profile of profiles) {
+    if (!profile || typeof profile !== 'object') {
+      continue;
+    }
+    const record = profile as Record<string, unknown>;
+    const profileTierRank = tierRank[String(record.tier || '')];
+    const qualities = Array.isArray(record.qualities) ? record.qualities : [];
+    const costs = record.costs && typeof record.costs === 'object'
+      ? record.costs as Record<string, unknown>
+      : {};
+    for (const configuredQuality of ['auto', 'low', 'medium', 'high']) {
+      if (!qualities.includes(configuredQuality) || costs[configuredQuality] === undefined) {
+        continue;
+      }
+      const value = Number(costs[configuredQuality]);
+      if (!Number.isFinite(value)) {
+        continue;
+      }
+      const next = {
+        value: Math.max(0, value),
+        tierRank: Number(profileTierRank || 0),
+        qualityRank: qualityRank[configuredQuality],
+      };
+      if (!highest
+        || next.tierRank > highest.tierRank
+        || (next.tierRank === highest.tierRank && next.qualityRank > highest.qualityRank)) {
+        highest = next;
+      }
+    }
   }
-  const value = Number((costs as Record<string, unknown>)[quality] || 0);
-  return Number.isFinite(value) && value > 0 ? value : 0;
+  if (highest) {
+    return { value: highest.value, source: 'highest_configured_fallback' as const };
+  }
+
+  return { value: 0, source: 'unconfigured' as const };
 }
 
 function providerResponseFormatCompatibilityReason(
@@ -770,7 +825,7 @@ export async function buildSmartImageRoutingPlan(input: {
     const currentConcurrency = currentProviderConcurrency(provider.providerId);
     const maxConcurrency = resolveProviderConcurrencyMax(provider);
     const concurrencyScore = scoreFromConcurrency(provider);
-    const price = priceForProvider(provider, tier, quality);
+    const cost = priceForProvider(provider, tier, quality);
     const successLatency = measuredSuccessLatency(provider);
     const responseFormatCompatibilityReason = providerResponseFormatCompatibilityReason(
       provider,
@@ -788,7 +843,8 @@ export async function buildSmartImageRoutingPlan(input: {
       currentConcurrency,
       maxConcurrency,
       concurrencyScore,
-      price,
+      price: cost.value,
+      costSource: cost.source,
       successLatency,
       responseFormatCompatibilityReason,
     };
@@ -824,7 +880,8 @@ export async function buildSmartImageRoutingPlan(input: {
         `concurrency_current=${candidate.currentConcurrency}`,
         `concurrency_max=${candidate.maxConcurrency}`,
         `concurrency_full=${candidate.maxConcurrency > 0 && candidate.currentConcurrency >= candidate.maxConcurrency ? 'true' : 'false'}`,
-        `price=${candidate.price.toFixed(4)}`,
+        `price=${candidate.price.toFixed(5)}`,
+        `cost_source=${candidate.costSource}`,
         `cost_median=${costMedian.toFixed(4)}`,
         `effective_cost=${deliveryEconomics.effectiveCost.toFixed(4)}`,
         `cost_index=${deliveryEconomics.costIndex.toFixed(4)}`,
@@ -856,6 +913,7 @@ export async function buildSmartImageRoutingPlan(input: {
       healthScore: candidate.healthScore,
       concurrencyScore: candidate.concurrencyScore,
       price: candidate.price,
+      costSource: candidate.costSource,
       costMedian,
       effectiveCost: deliveryEconomics.effectiveCost,
       costIndex: deliveryEconomics.costIndex,
