@@ -133,6 +133,12 @@ function formatDuration(value?: number) {
     : EMPTY_DASH;
 }
 
+function latencySourceLabel(source?: RoutingCandidate['latencySource']) {
+  if (source === 'success_ewma') return '成功出图 EWMA';
+  if (source === 'legacy_ewma') return '迁移期总耗时 EWMA';
+  return '候选中位数兜底';
+}
+
 function candidateUseLabel(mode: string, rank: number) {
   if (mode === 'smart_priority') {
     return rank === 1 ? '实际使用' : '仅排序参考';
@@ -218,7 +224,9 @@ function renderPlanTable(plan: RoutingDiagnosticsPreviewPlan) {
             <Space direction="vertical" size={0} align="end">
               <span className="tabular">{formatDuration(value)}</span>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                {record?.measuredSuccessLatencyMs ? `实测 ${formatDuration(record.measuredSuccessLatencyMs)}` : '候选中位数兜底'}
+                {record?.observedLatencyMs
+                  ? `${latencySourceLabel(record.latencySource)} ${formatDuration(record.observedLatencyMs)}`
+                  : latencySourceLabel(record?.latencySource)}
               </Text>
             </Space>
           ),

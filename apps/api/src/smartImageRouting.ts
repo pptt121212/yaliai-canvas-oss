@@ -39,7 +39,8 @@ export type SmartImageRoutingCandidate = {
   currentConcurrency: number;
   maxConcurrency: number;
   estimatedLatencyMs: number;
-  measuredSuccessLatencyMs?: number;
+  observedLatencyMs?: number;
+  latencySource: 'success_ewma' | 'legacy_ewma' | 'candidate_median';
   successLatencySampleCount: number;
   qualityScore: number;
   healthScore: number;
@@ -671,7 +672,11 @@ function medianPositive(values: number[]) {
     : sorted[middle];
 }
 
-function measuredSuccessLatency(provider: ProviderConfig) {
+function measuredSuccessLatency(provider: ProviderConfig): {
+  latencyMs?: number;
+  sampleCount: number;
+  source: 'success_ewma' | 'legacy_ewma' | 'candidate_median';
+} {
   const runtime = provider.metadata?.runtime as {
     ewmaSuccessLatencyMs?: unknown;
     ewmaLatencyMs?: unknown;
@@ -844,7 +849,8 @@ export async function buildSmartImageRoutingPlan(input: {
       currentConcurrency: candidate.currentConcurrency,
       maxConcurrency: candidate.maxConcurrency,
       estimatedLatencyMs,
-      measuredSuccessLatencyMs: candidate.successLatency.latencyMs,
+      observedLatencyMs: candidate.successLatency.latencyMs,
+      latencySource: candidate.successLatency.source,
       successLatencySampleCount: candidate.successLatency.sampleCount,
       qualityScore: candidate.accuracyScore,
       healthScore: candidate.healthScore,

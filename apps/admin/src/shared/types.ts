@@ -501,7 +501,8 @@ export type RoutingDiagnosticsPreviewPlan = {
     concurrencyScore: number;
     price: number;
     estimatedLatencyMs: number;
-    measuredSuccessLatencyMs?: number;
+    observedLatencyMs?: number;
+    latencySource: 'success_ewma' | 'legacy_ewma' | 'candidate_median';
     successLatencySampleCount: number;
     costMedian: number;
     effectiveCost: number;

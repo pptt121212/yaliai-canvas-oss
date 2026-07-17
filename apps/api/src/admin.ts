@@ -428,9 +428,10 @@ async function buildRoutingDiagnosticsPayload() {
           concurrencyScore: Number(candidate.concurrencyScore.toFixed(2)),
           price: candidate.price,
           estimatedLatencyMs: Math.round(candidate.estimatedLatencyMs),
-          measuredSuccessLatencyMs: candidate.measuredSuccessLatencyMs
-            ? Math.round(candidate.measuredSuccessLatencyMs)
+          observedLatencyMs: candidate.observedLatencyMs
+            ? Math.round(candidate.observedLatencyMs)
             : undefined,
+          latencySource: candidate.latencySource,
           successLatencySampleCount: candidate.successLatencySampleCount,
           costMedian: candidate.costMedian,
           effectiveCost: candidate.effectiveCost,
