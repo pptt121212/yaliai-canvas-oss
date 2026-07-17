@@ -386,6 +386,9 @@ export function computeProviderRuntimeAfterAttempt(
 
   const latencyMs = Math.max(0, Number(report.latencyMs || 0));
   const governance = resolveFailureGovernance(report);
+  if (report.affectsHealth === false && governance.cooldownMs <= 0) {
+    return runtime;
+  }
   runtime.recoveryStartedAt = undefined;
   runtime.recoveryUntil = undefined;
   runtime.recoveryScoreFloor = undefined;
