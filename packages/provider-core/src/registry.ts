@@ -60,6 +60,7 @@ function normalizeRuntimeState(runtime: ProviderRuntimeState | undefined, config
     ewmaSuccessRate: Number.isFinite(Number(runtime?.ewmaSuccessRate))
       ? clampNumber(Number(runtime?.ewmaSuccessRate), 0, 1)
       : DEFAULT_EWMA_SUCCESS_RATE,
+    ewmaSuccessLatencyMs: Math.max(0, Number(runtime?.ewmaSuccessLatencyMs || 0)),
     ewmaLatencyMs: Math.max(0, Number(runtime?.ewmaLatencyMs || 0)),
     lastErrorCategory: runtime?.lastErrorCategory || '',
     lastErrorMessage: runtime?.lastErrorMessage || '',
@@ -367,6 +368,9 @@ export function computeProviderRuntimeAfterAttempt(
     runtime.ewmaLatencyMs = latencyMs > 0
       ? Math.round(ewma(Number(runtime.ewmaLatencyMs || latencyMs), latencyMs, DEFAULT_LATENCY_ALPHA))
       : Number(runtime.ewmaLatencyMs || 0);
+    runtime.ewmaSuccessLatencyMs = latencyMs > 0
+      ? Math.round(ewma(Number(runtime.ewmaSuccessLatencyMs || latencyMs), latencyMs, DEFAULT_LATENCY_ALPHA))
+      : Number(runtime.ewmaSuccessLatencyMs || 0);
     runtime.cooldownUntil = undefined;
     runtime.fusedUntil = undefined;
     runtime.recoveryStartedAt = undefined;

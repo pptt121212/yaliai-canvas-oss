@@ -331,8 +331,8 @@ export function OverviewPage({
                 </Form.Item>
                 <Form.Item
                   name={['routing', 'smartRoutingCostPriorityBaseDelta']}
-                  label="成本优先分差阈值"
-                  extra="当两条候选线路的基础分差不超过这个值时，智能/优选模式会优先选择更便宜的线路。值越小，越倾向先看综合分；值越大，越倾向先看成本。"
+                  label="可靠性比较分差阈值"
+                  extra="当两条候选线路的可靠性基础分差不超过这个值时，智能/优选模式会按“成功出图预测耗时 × 受中位成本约束的成本指数”排序。值越小，越优先保障可靠性；值越大，越充分平衡成本与速度。"
                 >
                   <InputNumber min={0} max={100} style={{ width: '100%' }} />
                 </Form.Item>

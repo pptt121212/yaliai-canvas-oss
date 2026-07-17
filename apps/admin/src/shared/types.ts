@@ -499,8 +499,14 @@ export type RoutingDiagnosticsPreviewPlan = {
     qualityScore: number;
     healthScore: number;
     concurrencyScore: number;
-    costScore: number;
     price: number;
+    estimatedLatencyMs: number;
+    measuredSuccessLatencyMs?: number;
+    successLatencySampleCount: number;
+    costMedian: number;
+    effectiveCost: number;
+    costIndex: number;
+    deliveryValueIndex: number;
     currentConcurrency: number;
     reasons: string[];
   }>;

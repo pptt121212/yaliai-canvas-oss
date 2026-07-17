@@ -126,6 +126,13 @@ function formatPrice(value: number) {
   return price > 0 ? price.toFixed(4) : EMPTY_DASH;
 }
 
+function formatDuration(value?: number) {
+  const milliseconds = Number(value || 0);
+  return Number.isFinite(milliseconds) && milliseconds > 0
+    ? `${(milliseconds / 1000).toFixed(1)} 秒`
+    : EMPTY_DASH;
+}
+
 function candidateUseLabel(mode: string, rank: number) {
   if (mode === 'smart_priority') {
     return rank === 1 ? '实际使用' : '仅排序参考';
@@ -153,7 +160,9 @@ function readableScoreReason(record: RoutingCandidate) {
     .filter(Boolean);
   return [
     `健康 ${formatScore(record.healthScore)} 是主要依据`,
-    `成本 ${formatPrice(record.price)}`,
+    `预计成功出图 ${formatDuration(record.estimatedLatencyMs)}（成功样本 ${record.successLatencySampleCount}）`,
+    `成本 ${formatPrice(record.price)} / 中位数 ${formatPrice(record.costMedian)} / 指数 ${record.costIndex.toFixed(2)}`,
+    `交付指数 ${record.deliveryValueIndex.toFixed(1)}`,
     `并发 ${record.currentConcurrency}`,
     `规格稳定 ${formatScore(record.qualityScore)} 仅低权重参考`,
     ...compatibilityNotes,
@@ -166,7 +175,7 @@ function renderPlanTable(plan: RoutingDiagnosticsPreviewPlan) {
       size="small"
       rowKey={(record) => `${plan.mode}-${record?.providerId || 'unknown'}`}
       pagination={false}
-      scroll={{ x: 1160 }}
+      scroll={{ x: 1440 }}
       dataSource={plan.candidates}
       columns={[
         {
@@ -201,6 +210,34 @@ function renderPlanTable(plan: RoutingDiagnosticsPreviewPlan) {
           render: (value: number) => <span className="tabular">{formatPrice(value)}</span>,
         },
         {
+          title: '预计成功出图',
+          dataIndex: 'estimatedLatencyMs',
+          width: 126,
+          align: 'right',
+          render: (value: number, record?: RoutingCandidate) => (
+            <Space direction="vertical" size={0} align="end">
+              <span className="tabular">{formatDuration(value)}</span>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {record?.measuredSuccessLatencyMs ? `实测 ${formatDuration(record.measuredSuccessLatencyMs)}` : '候选中位数兜底'}
+              </Text>
+            </Space>
+          ),
+        },
+        {
+          title: '成本指数',
+          dataIndex: 'costIndex',
+          width: 98,
+          align: 'right',
+          render: (value: number) => <span className="tabular">{Number(value || 0).toFixed(2)}x</span>,
+        },
+        {
+          title: '交付指数',
+          dataIndex: 'deliveryValueIndex',
+          width: 104,
+          align: 'right',
+          render: (value: number) => <span className="tabular">{Number(value || 0).toFixed(1)}</span>,
+        },
+        {
           title: '综合排序分',
           dataIndex: 'score',
           width: 112,
@@ -220,13 +257,6 @@ function renderPlanTable(plan: RoutingDiagnosticsPreviewPlan) {
           width: 112,
           align: 'right',
           render: (value: number) => <span className="tabular">{value}</span>,
-        },
-        {
-          title: '成本分',
-          dataIndex: 'costScore',
-          width: 92,
-          align: 'right',
-          render: (value: number) => <span className="tabular">{formatScore(value)}</span>,
         },
         {
           title: '规格稳定',
@@ -311,7 +341,7 @@ function renderPreviewPanel(preview: RoutingDiagnosticsPreview) {
         type="info"
         showIcon
         message={previewContextLabel(preview)}
-        description="这里不是分辨率统计表，而是用这个典型请求场景模拟一次真实智能路由：先过滤不匹配线路，再按健康、成本、并发压力和规格稳定性排序。"
+        description="这里不是分辨率统计表，而是用这个典型请求场景模拟一次真实智能路由：先过滤不匹配线路，再按可靠性基础分筛选可比较候选，最后平衡成功出图速度与成本。"
       />
       <Tabs
         type="card"
@@ -470,8 +500,8 @@ function renderRoutingOverviewFlow() {
               <strong>2. 运行态与评分</strong>
               <ul className="routing-graph__list">
                 <li>临时阻断：`in_cooldown`、`auth_failed`。</li>
-                <li>权重：健康 45% + 成本 25% + 并发 20% + 规格稳定 10%。</li>
-                <li>基础分差值 ≤ 50 时优先更便宜线路；否则先看综合分。</li>
+                <li>可靠性基线：健康 60% + 并发 26.67% + 规格稳定 13.33%。</li>
+                <li>可靠性接近时，按“预计成功出图耗时 × 受中位成本约束的成本指数”排序。</li>
               </ul>
             </div>
             <div className="routing-graph__panel is-warning">

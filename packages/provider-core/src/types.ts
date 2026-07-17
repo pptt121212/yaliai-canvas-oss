@@ -60,6 +60,8 @@ export type ProviderRuntimeState = {
   consecutiveSlowRequests?: number;
   consecutiveFailures?: number;
   ewmaSuccessRate?: number;
+  // Only successful requests with usable output contribute to this metric.
+  ewmaSuccessLatencyMs?: number;
   ewmaLatencyMs?: number;
   lastErrorCategory?: string;
   lastErrorMessage?: string;

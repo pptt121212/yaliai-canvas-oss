@@ -38,12 +38,17 @@ export type SmartImageRoutingCandidate = {
   reasons: string[];
   currentConcurrency: number;
   maxConcurrency: number;
-  estimatedLatencyScore: number;
+  estimatedLatencyMs: number;
+  measuredSuccessLatencyMs?: number;
+  successLatencySampleCount: number;
   qualityScore: number;
   healthScore: number;
   concurrencyScore: number;
-  costScore: number;
   price: number;
+  costMedian: number;
+  effectiveCost: number;
+  costIndex: number;
+  deliveryValueIndex: number;
 };
 
 type ProviderFilterReason = {
@@ -95,10 +100,14 @@ type AccuracySnapshotIndex = {
   aspectRowsByProviderId: Map<string, ResolutionAuditSummaryRow>;
 };
 
-const ROUTING_HEALTH_WEIGHT = 0.45;
-const ROUTING_CONCURRENCY_WEIGHT = 0.2;
-const ROUTING_ACCURACY_WEIGHT = 0.1;
-const ROUTING_COST_SCORE_WEIGHT = 0.25;
+// Reliability decides whether candidates are comparable. Cost then competes
+// with predicted successful output time inside that comparable range.
+const ROUTING_HEALTH_WEIGHT = 0.6;
+const ROUTING_CONCURRENCY_WEIGHT = 0.2667;
+const ROUTING_ACCURACY_WEIGHT = 0.1333;
+const COST_MEDIAN_FLOOR_RATIO = 0.5;
+const DEFAULT_PREDICTED_SUCCESS_LATENCY_MS = 60_000;
+const SUCCESS_LATENCY_WARMUP_SAMPLES = 5;
 const accuracyCacheTtlMs = Math.max(5_000, Number(process.env.SMART_ROUTING_ACCURACY_CACHE_MS || 15_000));
 const accuracySampleLimit = Math.max(200, Math.min(5_000, Number(process.env.SMART_ROUTING_ACCURACY_TASK_SAMPLE_LIMIT || 1_500)));
 const accuracySnapshotKey = 'image_resolution_accuracy_v1';
@@ -610,40 +619,13 @@ function priceForProvider(
   return providerCapabilityCost(provider, requestedTierValue, requestedQualityValue);
 }
 
-function scoreFromCost(
-  provider: ProviderConfig,
-  requestedTierValue: 'auto' | '1k' | '2k' | '4k',
-  requestedQualityValue: 'auto' | 'low' | 'medium' | 'high',
-) {
-  const price = priceForProvider(provider, requestedTierValue, requestedQualityValue);
-  if (price <= 0) {
-    return 50;
-  }
-  if (price <= 0.01) {
-    return 100;
-  }
-  if (price <= 0.03) {
-    return 92;
-  }
-  if (price <= 0.06) {
-    return 84;
-  }
-  if (price <= 0.1) {
-    return 76;
-  }
-  if (price <= 0.2) {
-    return 68;
-  }
-  return 60;
-}
-
-function costPriorityScoreDelta() {
+function reliabilityComparisonScoreDelta() {
   const value = Number(adminControlPlaneStore.get().routing.smartRoutingCostPriorityBaseDelta || 30);
   return Math.max(0, Math.min(100, Math.floor(value)));
 }
 
 function compareSmartCandidates(left: SmartImageRoutingCandidate, right: SmartImageRoutingCandidate) {
-  const scoreDeltaThreshold = costPriorityScoreDelta();
+  const scoreDeltaThreshold = reliabilityComparisonScoreDelta();
   const leftFull = left.maxConcurrency > 0 && left.currentConcurrency >= left.maxConcurrency;
   const rightFull = right.maxConcurrency > 0 && right.currentConcurrency >= right.maxConcurrency;
   if (leftFull !== rightFull) {
@@ -653,18 +635,13 @@ function compareSmartCandidates(left: SmartImageRoutingCandidate, right: SmartIm
   if (Math.abs(baseDelta) > scoreDeltaThreshold) {
     return baseDelta;
   }
+  const deliveryValueDelta = left.deliveryValueIndex - right.deliveryValueIndex;
+  if (Math.abs(deliveryValueDelta) > 0.000_001) {
+    return deliveryValueDelta;
+  }
   const healthDelta = right.healthScore - left.healthScore;
   const qualityDelta = right.qualityScore - left.qualityScore;
   const concurrencyDelta = right.concurrencyScore - left.concurrencyScore;
-  if (left.price !== right.price) {
-    if (left.price <= 0) {
-      return 1;
-    }
-    if (right.price <= 0) {
-      return -1;
-    }
-    return left.price - right.price;
-  }
   if (healthDelta !== 0) {
     return healthDelta;
   }
@@ -678,6 +655,62 @@ function compareSmartCandidates(left: SmartImageRoutingCandidate, right: SmartIm
     return left.currentConcurrency - right.currentConcurrency;
   }
   return Number(left.provider.priority || 100) - Number(right.provider.priority || 100);
+}
+
+function medianPositive(values: number[]) {
+  const sorted = values
+    .map((value) => Number(value || 0))
+    .filter((value) => Number.isFinite(value) && value > 0)
+    .sort((left, right) => left - right);
+  if (!sorted.length) {
+    return 0;
+  }
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[middle - 1] + sorted[middle]) / 2
+    : sorted[middle];
+}
+
+function measuredSuccessLatency(provider: ProviderConfig) {
+  const runtime = provider.metadata?.runtime as {
+    ewmaSuccessLatencyMs?: unknown;
+    ewmaLatencyMs?: unknown;
+    successCount?: unknown;
+  } | undefined;
+  const successLatencyMs = Number(runtime?.ewmaSuccessLatencyMs || 0);
+  const legacyLatencyMs = Number(runtime?.ewmaLatencyMs || 0);
+  const sampleCount = Math.max(0, Number(runtime?.successCount || 0));
+  const hasSuccessLatency = Number.isFinite(successLatencyMs) && successLatencyMs > 0;
+  const hasLegacyLatency = Number.isFinite(legacyLatencyMs) && legacyLatencyMs > 0;
+  return {
+    latencyMs: hasSuccessLatency
+      ? successLatencyMs
+      : (hasLegacyLatency ? legacyLatencyMs : undefined),
+    sampleCount: Number.isFinite(sampleCount) ? Math.floor(sampleCount) : 0,
+    source: hasSuccessLatency ? 'success_ewma' : (hasLegacyLatency ? 'legacy_ewma' : 'candidate_median'),
+  };
+}
+
+export function buildCostSpeedDeliveryIndex(input: {
+  price: number;
+  costMedian: number;
+  predictedLatencyMs: number;
+}) {
+  const rawMedian = Number(input.costMedian || 0);
+  const costMedian = Number.isFinite(rawMedian) && rawMedian > 0 ? rawMedian : 1;
+  const price = Number(input.price || 0);
+  const costKnown = Number.isFinite(price) && price > 0;
+  const effectiveCost = costKnown
+    ? Math.max(price, costMedian * COST_MEDIAN_FLOOR_RATIO)
+    : costMedian;
+  const costIndex = effectiveCost / costMedian;
+  const predictedLatencyMs = Math.max(0, Number(input.predictedLatencyMs || 0));
+  return {
+    costKnown,
+    effectiveCost,
+    costIndex,
+    deliveryValueIndex: predictedLatencyMs * costIndex,
+  };
 }
 
 export async function buildSmartImageRoutingPlan(input: {
@@ -695,7 +728,7 @@ export async function buildSmartImageRoutingPlan(input: {
   const candidates: SmartImageRoutingCandidate[] = [];
   const tier = requestTier(input.context.requestedSize);
   const quality = requestedQuality(input.context.requestedQuality);
-  const scoreDeltaThreshold = costPriorityScoreDelta();
+  const scoreDeltaThreshold = reliabilityComparisonScoreDelta();
 
   for (const provider of runtimeProviders) {
     const filterResult = filterProviderForRequest(provider, input.context);
@@ -725,58 +758,102 @@ export async function buildSmartImageRoutingPlan(input: {
 
   const accuracyIndex = await buildAccuracySnapshotIndex(input.context);
 
-  for (const provider of candidateProviders) {
+  const unrankedCandidates = candidateProviders.map((provider) => {
     const accuracy = buildAccuracySnapshot(provider.providerId, accuracyIndex);
     const accuracyScore = scoreFromAccuracy(accuracy);
     const healthScore = scoreFromHealth(provider);
     const currentConcurrency = currentProviderConcurrency(provider.providerId);
     const maxConcurrency = resolveProviderConcurrencyMax(provider);
     const concurrencyScore = scoreFromConcurrency(provider);
-    const costScore = scoreFromCost(provider, tier, quality);
     const price = priceForProvider(provider, tier, quality);
+    const successLatency = measuredSuccessLatency(provider);
     const responseFormatCompatibilityReason = providerResponseFormatCompatibilityReason(
       provider,
       input.context.requestedResponseFormat,
     );
     const baseScore = healthScore * ROUTING_HEALTH_WEIGHT
       + concurrencyScore * ROUTING_CONCURRENCY_WEIGHT
-      + accuracyScore * ROUTING_ACCURACY_WEIGHT
-      + costScore * ROUTING_COST_SCORE_WEIGHT;
-    const score = baseScore;
-    candidates.push({
+      + accuracyScore * ROUTING_ACCURACY_WEIGHT;
+    return {
       provider,
-      score,
+      score: baseScore,
       baseScore,
+      accuracyScore,
+      healthScore,
+      currentConcurrency,
+      maxConcurrency,
+      concurrencyScore,
+      price,
+      successLatency,
+      responseFormatCompatibilityReason,
+    };
+  });
+  const costMedian = medianPositive(unrankedCandidates.map((candidate) => candidate.price)) || 1;
+  const estimatedLatencyFallbackMs = medianPositive(
+    unrankedCandidates.map((candidate) => candidate.successLatency.latencyMs || 0),
+  ) || DEFAULT_PREDICTED_SUCCESS_LATENCY_MS;
+
+  for (const candidate of unrankedCandidates) {
+    const latencyConfidence = Math.min(
+      1,
+      candidate.successLatency.sampleCount / SUCCESS_LATENCY_WARMUP_SAMPLES,
+    );
+    const estimatedLatencyMs = candidate.successLatency.latencyMs
+      ? candidate.successLatency.latencyMs * latencyConfidence
+        + estimatedLatencyFallbackMs * (1 - latencyConfidence)
+      : estimatedLatencyFallbackMs;
+    const deliveryEconomics = buildCostSpeedDeliveryIndex({
+      price: candidate.price,
+      costMedian,
+      predictedLatencyMs: estimatedLatencyMs,
+    });
+    candidates.push({
+      provider: candidate.provider,
+      score: candidate.score,
+      baseScore: candidate.baseScore,
       reasons: [
-        `base=${baseScore.toFixed(2)}`,
-        `accuracy=${accuracyScore.toFixed(2)}`,
-        `health=${healthScore.toFixed(2)}`,
-        `concurrency=${concurrencyScore.toFixed(2)}`,
-        `concurrency_current=${currentConcurrency}`,
-        `concurrency_max=${maxConcurrency}`,
-        `concurrency_full=${maxConcurrency > 0 && currentConcurrency >= maxConcurrency ? 'true' : 'false'}`,
-        `cost=${costScore.toFixed(2)}`,
-        `price=${price.toFixed(4)}`,
+        `reliability_base=${candidate.baseScore.toFixed(2)}`,
+        `accuracy=${candidate.accuracyScore.toFixed(2)}`,
+        `health=${candidate.healthScore.toFixed(2)}`,
+        `concurrency=${candidate.concurrencyScore.toFixed(2)}`,
+        `concurrency_current=${candidate.currentConcurrency}`,
+        `concurrency_max=${candidate.maxConcurrency}`,
+        `concurrency_full=${candidate.maxConcurrency > 0 && candidate.currentConcurrency >= candidate.maxConcurrency ? 'true' : 'false'}`,
+        `price=${candidate.price.toFixed(4)}`,
+        `cost_median=${costMedian.toFixed(4)}`,
+        `effective_cost=${deliveryEconomics.effectiveCost.toFixed(4)}`,
+        `cost_index=${deliveryEconomics.costIndex.toFixed(4)}`,
+        `cost_known=${deliveryEconomics.costKnown ? 'true' : 'false'}`,
+        `success_latency_ms=${candidate.successLatency.latencyMs ? Math.round(candidate.successLatency.latencyMs) : 'fallback'}`,
+        `success_latency_source=${candidate.successLatency.source}`,
+        `success_latency_samples=${candidate.successLatency.sampleCount}`,
+        `success_latency_confidence=${latencyConfidence.toFixed(4)}`,
+        `estimated_success_latency_ms=${Math.round(estimatedLatencyMs)}`,
+        `delivery_value_index=${deliveryEconomics.deliveryValueIndex.toFixed(2)}`,
         `weight_health=${ROUTING_HEALTH_WEIGHT}`,
         `weight_concurrency=${ROUTING_CONCURRENCY_WEIGHT}`,
         `weight_accuracy=${ROUTING_ACCURACY_WEIGHT}`,
-        `weight_cost=${ROUTING_COST_SCORE_WEIGHT}`,
-        `cost_priority_base_delta=${scoreDeltaThreshold}`,
-        ...(responseFormatCompatibilityReason
-          ? [responseFormatCompatibilityReason]
+        `reliability_compare_base_delta=${scoreDeltaThreshold}`,
+        ...(candidate.responseFormatCompatibilityReason
+          ? [candidate.responseFormatCompatibilityReason]
           : []),
-        ...(fallbackReasons.has(provider.providerId)
-          ? [`temporary_runtime_fallback=${fallbackReasons.get(provider.providerId)}`]
+        ...(fallbackReasons.has(candidate.provider.providerId)
+          ? [`temporary_runtime_fallback=${fallbackReasons.get(candidate.provider.providerId)}`]
           : []),
       ],
-      currentConcurrency,
-      maxConcurrency,
-      estimatedLatencyScore: healthScore,
-      qualityScore: accuracyScore,
-      healthScore,
-      concurrencyScore,
-      costScore,
-      price,
+      currentConcurrency: candidate.currentConcurrency,
+      maxConcurrency: candidate.maxConcurrency,
+      estimatedLatencyMs,
+      measuredSuccessLatencyMs: candidate.successLatency.latencyMs,
+      successLatencySampleCount: candidate.successLatency.sampleCount,
+      qualityScore: candidate.accuracyScore,
+      healthScore: candidate.healthScore,
+      concurrencyScore: candidate.concurrencyScore,
+      price: candidate.price,
+      costMedian,
+      effectiveCost: deliveryEconomics.effectiveCost,
+      costIndex: deliveryEconomics.costIndex,
+      deliveryValueIndex: deliveryEconomics.deliveryValueIndex,
     });
   }
 
