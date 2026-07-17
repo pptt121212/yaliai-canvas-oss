@@ -532,6 +532,17 @@ function normalizeOpenAIImagesPayload(payload: z.infer<typeof openAIImagesSchema
   };
 }
 
+type DownstreamImageResponseFormat = 'url' | 'b64_json' | 'both';
+
+const implicitImageResponseFormatMetadataKey = '__yali_implicit_image_response_format';
+
+function resolveDownstreamImageResponseFormat(payload: z.infer<typeof openAIImagesSchema>): DownstreamImageResponseFormat {
+  if (payload.metadata?.[implicitImageResponseFormatMetadataKey] === 'both') {
+    return 'both';
+  }
+  return payload.response_format === 'b64_json' ? 'b64_json' : 'url';
+}
+
 function normalizePublicOpenAIImagesPayload(payload: z.infer<typeof openAIImagesSchema>) {
   const normalized = normalizeOpenAIImagesPayload(payload);
   if (normalized.response_format) {
@@ -540,6 +551,10 @@ function normalizePublicOpenAIImagesPayload(payload: z.infer<typeof openAIImages
   const defaultResponseFormat = adminControlPlaneStore.get().publicApi.defaultResponseFormat;
   return {
     ...normalized,
+    metadata: {
+      ...(normalized.metadata || {}),
+      [implicitImageResponseFormatMetadataKey]: 'both',
+    },
     response_format: defaultResponseFormat === 'b64_json' ? 'b64_json' as const : 'url' as const,
   };
 }
@@ -2266,12 +2281,14 @@ async function rewriteImageDataItemsToRequestedFormat(input: {
   request: any;
   taskId: string;
   data: Array<Record<string, unknown>>;
-  responseFormat?: string;
+  responseFormat?: DownstreamImageResponseFormat;
   outputFormat?: string;
   allowDirectPublicImageUrl?: boolean;
 }) {
   const rewritten: Array<Record<string, unknown>> = [];
   const publicBaseUrl = inferPublicBaseUrl(input.request);
+  const wantsUrl = input.responseFormat !== 'b64_json';
+  const wantsBase64 = input.responseFormat !== 'url';
   async function annotateDimensionsFromBase64(item: Record<string, unknown>, base64: string) {
     const audit = await buildImageResolutionAuditRecord({
       responsePayload: { data: [{ b64_json: base64 }] },
@@ -2286,7 +2303,7 @@ async function rewriteImageDataItemsToRequestedFormat(input: {
     const currentUrl = typeof item.url === 'string' ? item.url : '';
     const currentB64 = typeof item.b64_json === 'string' ? item.b64_json : '';
 
-    if (input.responseFormat === 'url' && !currentUrl && currentB64) {
+    if (wantsUrl && !currentUrl && currentB64) {
       await annotateDimensionsFromBase64(item, currentB64);
       const generatedUrl = await persistGeneratedImageAndBuildUrl({
         request: input.request,
@@ -2299,10 +2316,12 @@ async function rewriteImageDataItemsToRequestedFormat(input: {
         }),
       });
       item.url = generatedUrl;
-      delete item.b64_json;
+      if (!wantsBase64) {
+        delete item.b64_json;
+      }
     }
 
-    if (input.responseFormat === 'url' && currentUrl && /^data:image\//i.test(currentUrl)) {
+    if (wantsUrl && currentUrl && /^data:image\//i.test(currentUrl)) {
       const decoded = decodeImagePayloadToBase64(currentUrl);
       if (decoded?.base64) {
         await annotateDimensionsFromBase64(item, decoded.base64);
@@ -2313,11 +2332,14 @@ async function rewriteImageDataItemsToRequestedFormat(input: {
           base64: decoded.base64,
           extension: decoded.extension,
         });
+        if (wantsBase64) {
+          item.b64_json = decoded.base64;
+        }
       }
     }
 
     if (
-      input.responseFormat === 'url'
+      wantsUrl
       && currentUrl
       && /^https?:\/\//i.test(currentUrl)
       && !currentUrl.startsWith(`${publicBaseUrl}/v1/generated-images/`)
@@ -2331,22 +2353,35 @@ async function rewriteImageDataItemsToRequestedFormat(input: {
           item.height = audit.actualHeight;
         }
       } else {
-      const fetched = await fetchImageUrlAsBase64(currentUrl);
-      await annotateDimensionsFromBase64(item, fetched.base64);
-      item.url = await persistGeneratedImageAndBuildUrl({
-        request: input.request,
-        taskId: input.taskId,
-        imageIndex: index,
-        base64: fetched.base64,
-        extension: fetched.extension,
-      });
+        const fetched = await fetchImageUrlAsBase64(currentUrl);
+        await annotateDimensionsFromBase64(item, fetched.base64);
+        item.url = await persistGeneratedImageAndBuildUrl({
+          request: input.request,
+          taskId: input.taskId,
+          imageIndex: index,
+          base64: fetched.base64,
+          extension: fetched.extension,
+        });
+        if (wantsBase64) {
+          item.b64_json = fetched.base64;
+        }
       }
     }
 
-    if (input.responseFormat === 'b64_json' && !currentB64 && currentUrl) {
-      const fetched = await fetchImageUrlAsBase64(currentUrl);
-      item.b64_json = fetched.base64;
+    if (wantsBase64 && typeof item.b64_json !== 'string' && currentUrl) {
+      const decoded = /^data:image\//i.test(currentUrl)
+        ? decodeImagePayloadToBase64(currentUrl)
+        : null;
+      const base64 = decoded?.base64 || (await fetchImageUrlAsBase64(currentUrl)).base64;
+      item.b64_json = base64;
+      await annotateDimensionsFromBase64(item, base64);
+    }
+
+    if (!wantsUrl) {
       delete item.url;
+    }
+    if (!wantsBase64) {
+      delete item.b64_json;
     }
 
     for (const key of Object.keys(item)) {
@@ -2369,7 +2404,7 @@ async function normalizeStandardImageResponseBody(input: {
   responseContentType?: string;
   bodyBinaryBase64?: string;
   bodyBinaryExtension?: string;
-  responseFormat?: string;
+  responseFormat?: DownstreamImageResponseFormat;
   outputFormat?: string;
   requestedImageCount?: number;
   requestedSize?: string;
@@ -5323,11 +5358,11 @@ async function buildImageTaskResponsePayload(input: {
   responseContentType?: string;
   bodyBinaryBase64?: string;
   bodyBinaryExtension?: string;
-  responseFormatOverride?: 'url' | 'b64_json';
+  responseFormatOverride?: DownstreamImageResponseFormat;
   normalizedBody?: unknown;
 }): Promise<Record<string, unknown>> {
   const outputFormat = String(input.payload.extra_body?.output_format || input.payload.output_format || 'png');
-  const requestedResponseFormat = input.responseFormatOverride || input.payload.response_format;
+  const requestedResponseFormat = input.responseFormatOverride || resolveDownstreamImageResponseFormat(input.payload);
   let responseBody: unknown = input.normalizedBody !== undefined ? input.normalizedBody : input.bodyJson ?? (
     input.bodyBinaryBase64
       ? {
@@ -5415,7 +5450,7 @@ async function buildImageTaskResponsePayload(input: {
       operation: input.operation,
       size: input.payload.size || null,
       upstreamRequestedSize: input.payload.size || null,
-      responseFormat: input.payload.response_format || null,
+      responseFormat: resolveDownstreamImageResponseFormat(input.payload),
       storedResponseFormat: requestedResponseFormat || null,
       quality: input.payload.quality || null,
       requestedImageCount: input.payload.n || 1,
@@ -5656,7 +5691,7 @@ function collectImageLikeOutputs(value: unknown, results: Array<Record<string, u
   return results;
 }
 
-function toOpenAIImageDataItem(item: Record<string, unknown>, responseFormat?: string) {
+function toOpenAIImageDataItem(item: Record<string, unknown>, responseFormat?: DownstreamImageResponseFormat) {
   const result = typeof item.result === 'string' ? item.result : '';
   const url = typeof item.url === 'string'
     ? item.url
@@ -5696,7 +5731,7 @@ async function normalizeResponsesImageBody(input: {
   taskId: string;
   bodyJson?: unknown;
   bodyText: string;
-  responseFormat?: string;
+  responseFormat?: DownstreamImageResponseFormat;
   outputFormat?: string;
   requestedImageCount?: number;
   requestedSize?: string;
@@ -5782,7 +5817,7 @@ type PersistImageGatewayAttemptInput = {
   responseContentType?: string;
   responseBodyBinaryBase64?: string;
   responseBodyBinaryExtension?: string;
-  responseFormatOverride?: 'url' | 'b64_json';
+  responseFormatOverride?: DownstreamImageResponseFormat;
   allowDirectPublicImageUrl?: boolean;
   errorPayload?: Record<string, unknown> | null;
   responsePayload?: Record<string, unknown> | null;
@@ -6482,7 +6517,7 @@ async function replyWithProxyResult(
         taskId,
         bodyJson: result.response.bodyJson,
         bodyText: result.response.bodyText,
-        responseFormat: submittedPayload.response_format,
+        responseFormat: resolveDownstreamImageResponseFormat(submittedPayload),
         outputFormat: String(submittedPayload.extra_body?.output_format || 'png'),
         requestedImageCount: submittedPayload.n,
         requestedSize: submittedPayload.size,
@@ -6498,7 +6533,7 @@ async function replyWithProxyResult(
           taskId,
           bodyJson: result.response.bodyJson,
           bodyText: result.response.bodyText,
-          responseFormat: submittedPayload.response_format,
+          responseFormat: resolveDownstreamImageResponseFormat(submittedPayload),
           outputFormat: String(submittedPayload.extra_body?.output_format || 'png'),
           requestedImageCount: submittedPayload.n,
           requestedSize: submittedPayload.size,

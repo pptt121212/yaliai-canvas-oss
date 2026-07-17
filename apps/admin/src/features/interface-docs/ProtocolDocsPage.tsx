@@ -202,7 +202,7 @@ Content-Type: application/json
     ],
     downstreamRules: [
       'prompt 为必填字段；当前公开 Images 契约下，文生图和图生图都要求传入非空 prompt。',
-      'response_format 支持 url 与 b64_json；下游未传时，才会回退到后台默认返回格式。',
+      'response_format 支持 url 与 b64_json；显式传入时严格返回对应格式，未传时会同时返回可访问 url 与 b64_json，兼容未声明格式的下游客户端。',
       '同步 JSON 成功时，网关返回统一 Images 响应；同步失败时，返回统一平台错误，不直接透传上游原始报错文本。',
       'stream=true 只在同步模式生效；网关会在拿到完整图片结果后，再输出标准 SSE，而不是逐 token 或逐块实时透传上游私有流。',
       '若同时传入 async=true 与 stream=true，以 async=true 为准，首次响应固定返回任务回执而不是 SSE。',
@@ -221,7 +221,7 @@ Content-Type: application/json
       { key: 'images-prompt', field: 'prompt', role: '正式支持', source: '下游 JSON / multipart', notes: '必填。当前 Images 公开契约要求非空字符串。' },
       { key: 'images-size', field: 'size', role: '正式支持', source: '下游 JSON / multipart', notes: '可选。支持具体像素尺寸，例如 1024x1024；也兼容比例写法，例如 1:1、16:9。' },
       { key: 'images-resolution', field: 'resolution', role: '兼容字段', source: '下游 JSON / multipart', notes: '可选，仅在 size 是比例写法时参与映射。支持 1k / 2k / 4k；若 size 已经是具体像素尺寸，则 resolution 不再改变上游请求尺寸。' },
-      { key: 'images-response-format', field: 'response_format', role: '正式支持', source: '下游 JSON / multipart', notes: '可选，仅支持 url / b64_json。未传时回退到后台默认值。' },
+      { key: 'images-response-format', field: 'response_format', role: '正式支持', source: '下游 JSON / multipart', notes: '可选，仅支持 url / b64_json。显式传入时严格返回对应格式；未传时同一 data 项同时返回 url 与 b64_json。' },
       { key: 'images-quality', field: 'quality', role: '正式支持', source: '下游 JSON / multipart', notes: '可选。用于请求画质；仍会受 API Key 画质上限约束。' },
       { key: 'images-n', field: 'n', role: '正式支持', source: '下游 JSON / multipart', notes: '可选，最大 10。表示请求图片数量。' },
       { key: 'images-user', field: 'user', role: '正式支持', source: '下游 JSON / multipart', notes: '可选。作为标准兼容字段透传给上游。' },
