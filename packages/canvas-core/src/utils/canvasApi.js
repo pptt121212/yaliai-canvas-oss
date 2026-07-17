@@ -243,6 +243,25 @@ export async function regenerateCanvasUserApiKey(config) {
   return requestCanvasControlJson(endpoint, { method: 'POST' });
 }
 
+export async function getCanvasUserApiKeys(config) {
+  const endpoint = String(config?.userControl?.apiKeysEndpoint || '').trim();
+  if (!endpoint) {
+    throw new Error('画布未配置 API 密钥列表接口。');
+  }
+  return requestCanvasControlJson(endpoint, { method: 'GET' });
+}
+
+export async function setCanvasUserDefaultApiKey(config, apiKeyId) {
+  const endpoint = String(config?.userControl?.defaultApiKeyEndpoint || '').trim();
+  if (!endpoint) {
+    throw new Error('画布未配置默认 API 密钥设置接口。');
+  }
+  return requestCanvasControlJson(endpoint, {
+    method: 'PUT',
+    body: JSON.stringify({ apiKeyId: String(apiKeyId || '').trim() }),
+  });
+}
+
 export async function uploadCanvasReferenceAsset(config, imageInput, options = {}) {
   const adapter = getCanvasAdapter(config);
   if (typeof adapter?.uploadReferenceAsset === 'function') {

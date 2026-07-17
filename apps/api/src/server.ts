@@ -18,6 +18,7 @@ import {
   adminConsoleCatalogStore,
   createMaskedApiKey,
   initializeAdminConsoleCatalogStore,
+  type ConsoleApiKey,
   type ConsoleUpstream,
   type ImageCapabilityProfile,
 } from './modules/admin/consoleCatalog.js';
@@ -764,6 +765,10 @@ const canvasUserApiKeySettingsSchema = z.object({
   maxImageQuality: z.enum(['auto', 'low', 'medium', 'high']).default('high'),
 });
 
+const canvasUserDefaultApiKeySchema = z.object({
+  apiKeyId: z.string().trim().min(1),
+});
+
 const canvasUserFinanceLedgerQuerySchema = z.object({
   window_hours: z.coerce.number().int().min(1).max(168).optional(),
   windowHours: z.coerce.number().int().min(1).max(168).optional(),
@@ -957,6 +962,48 @@ app.put('/v1/canvas/user/api-key-settings', async (request, reply) => {
   return {
     success: true,
     user: await buildCanvasUserSessionPayload({ user: findCanvasUserById(user.id)! }),
+  };
+});
+
+app.get('/v1/canvas/user/api-keys', async (request, reply) => {
+  const { user } = await requireCanvasUser(request, reply);
+  await ensureCanvasTenantAndApiKeyForUser(user);
+  const currentUser = findCanvasUserById(user.id) || user;
+  const catalog = await adminConsoleCatalogStore.refreshAsync();
+  const apiKeys = listCanvasUserApiKeys(catalog.apiKeys, currentUser);
+  return {
+    apiKeys: apiKeys.map((apiKey) => buildCanvasUserApiKeyPayload(apiKey, currentUser.apiKeyId)),
+    defaultApiKeyId: currentUser.apiKeyId || '',
+  };
+});
+
+app.put('/v1/canvas/user/default-api-key', async (request, reply) => {
+  const body = canvasUserDefaultApiKeySchema.parse(request.body);
+  const { user } = await requireCanvasUser(request, reply);
+  await ensureCanvasTenantAndApiKeyForUser(user);
+  const currentUser = findCanvasUserById(user.id) || user;
+  const catalog = await adminConsoleCatalogStore.refreshAsync();
+  const apiKey = catalog.apiKeys.find((item) => item.id === body.apiKeyId && item.tenantId === currentUser.tenantId) || null;
+  if (!apiKey) {
+    reply.code(404);
+    return { error: 'api_key_not_found', message: '未找到属于当前账户的 API 密钥。' };
+  }
+  if (apiKey.status !== 'active') {
+    reply.code(400);
+    return { error: 'api_key_disabled', message: '已停用的 API 密钥不能设为画布默认密钥。' };
+  }
+  if (!String(apiKey.rawKey || '').trim()) {
+    reply.code(400);
+    return { error: 'api_key_secret_unavailable', message: '该 API 密钥未保存完整密钥，无法作为画布默认密钥。' };
+  }
+  await upsertCanvasUsers([{
+    ...currentUser,
+    apiKeyId: apiKey.id,
+    updatedAt: Date.now(),
+  }]);
+  return {
+    success: true,
+    defaultApiKeyId: apiKey.id,
   };
 });
 
@@ -1915,6 +1962,30 @@ async function persistCanvasReferenceAssetAndBuildPayload(input: {
     node_id: 'api-server',
     size_bytes: input.buffer.length,
     source: 'worker_temporary_reference_url',
+  };
+}
+
+function listCanvasUserApiKeys(apiKeys: ConsoleApiKey[], user: CanvasUserRecord) {
+  return apiKeys
+    .filter((item) => item.tenantId === user.tenantId)
+    .sort((left, right) => {
+      const leftIsDefault = left.id === user.apiKeyId ? 1 : 0;
+      const rightIsDefault = right.id === user.apiKeyId ? 1 : 0;
+      if (leftIsDefault !== rightIsDefault) {
+        return rightIsDefault - leftIsDefault;
+      }
+      return left.name.localeCompare(right.name, 'zh-CN');
+    });
+}
+
+function buildCanvasUserApiKeyPayload(apiKey: ConsoleApiKey, defaultApiKeyId?: string) {
+  return {
+    id: apiKey.id,
+    name: apiKey.name,
+    status: apiKey.status,
+    maskedKey: apiKey.maskedKey,
+    rawKey: apiKey.rawKey || '',
+    isDefault: apiKey.id === defaultApiKeyId,
   };
 }
 
@@ -7804,6 +7875,8 @@ app.get('/v1/canvas/session', async (request, reply) => {
       apiKeySettingsEndpoint: '/v1/canvas/user/api-key-settings',
       financeLedgerEndpoint: '/v1/canvas/user/tenant-finance-ledger',
       regenerateApiKeyEndpoint: '/v1/canvas/user/api-key/regenerate',
+      apiKeysEndpoint: '/v1/canvas/user/api-keys',
+      defaultApiKeyEndpoint: '/v1/canvas/user/default-api-key',
       imagePricingMatrix: Array.isArray(catalog.imagePricingMatrix) ? catalog.imagePricingMatrix : [],
       apiKeySettings: {
         imageRoutingMode: apiKey?.imageRoutingMode || 'smart_failover',

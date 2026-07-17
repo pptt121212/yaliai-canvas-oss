@@ -35,6 +35,7 @@ import {
   cancelCanvasWorkflowRun,
   changeCanvasUserPassword,
   clearCanvasTaskGroup,
+  getCanvasUserApiKeys,
   getCanvasUserFinanceLedger,
   getCanvasWorkflowRunStatus,
   imageUrlToBlob,
@@ -46,6 +47,7 @@ import {
   regenerateCanvasUserApiKey,
   registerCanvasUser,
   saveCanvasUserApiKeySettings,
+  setCanvasUserDefaultApiKey,
   selectCanvasResultVersion,
   startCanvasWorkflowRun,
   startCanvasImageTask,
@@ -1429,6 +1431,15 @@ function createFinanceLedgerState() {
   };
 }
 
+function createApiKeyListState() {
+  return {
+    loading: false,
+    error: '',
+    apiKeys: [],
+    defaultApiKeyId: '',
+  };
+}
+
 function createApiKeySettingsState(config) {
   const settings = config?.userControl?.apiKeySettings && typeof config.userControl.apiKeySettings === 'object'
     ? config.userControl.apiKeySettings
@@ -1614,6 +1625,7 @@ export default function App() {
   const [upstreamPreferenceForm, setUpstreamPreferenceForm] = useState(() => createUpstreamPreferenceState(readCanvasConfig()));
   const [apiKeySettingsForm, setApiKeySettingsForm] = useState(() => createApiKeySettingsState(readCanvasConfig()));
   const [financeLedgerState, setFinanceLedgerState] = useState(() => createFinanceLedgerState());
+  const [apiKeyListState, setApiKeyListState] = useState(() => createApiKeyListState());
   const [userActionPending, setUserActionPending] = useState(false);
   const [userModalError, setUserModalError] = useState('');
   const [userModalSuccess, setUserModalSuccess] = useState('');
@@ -1671,6 +1683,7 @@ export default function App() {
     setUserModalError('');
     setUserModalSuccess('');
     setFinanceLedgerState(createFinanceLedgerState());
+    setApiKeyListState(createApiKeyListState());
     setAuthForm(createAuthFormState());
     setPasswordForm(createPasswordFormState());
     syncUserPreferenceForm(rootConfig);
@@ -1715,6 +1728,39 @@ export default function App() {
     }
   }, [rootConfig]);
 
+  const loadCanvasUserApiKeys = useCallback(async () => {
+    if (!rootConfig?.isLoggedIn || !rootConfig?.userControl?.apiKeysEndpoint) {
+      setApiKeyListState(createApiKeyListState());
+      return;
+    }
+    setApiKeyListState((current) => ({ ...current, loading: true, error: '' }));
+    try {
+      const payload = await getCanvasUserApiKeys(rootConfig);
+      const apiKeys = Array.isArray(payload?.apiKeys)
+        ? payload.apiKeys.map((item) => ({
+            id: String(item?.id || '').trim(),
+            name: String(item?.name || '未命名密钥').trim() || '未命名密钥',
+            status: String(item?.status || 'disabled').trim(),
+            maskedKey: String(item?.maskedKey || '').trim(),
+            rawKey: String(item?.rawKey || '').trim(),
+            isDefault: Boolean(item?.isDefault),
+          })).filter((item) => item.id)
+        : [];
+      setApiKeyListState({
+        loading: false,
+        error: '',
+        apiKeys,
+        defaultApiKeyId: String(payload?.defaultApiKeyId || '').trim(),
+      });
+    } catch (error) {
+      setApiKeyListState((current) => ({
+        ...current,
+        loading: false,
+        error: error?.message || '加载 API 密钥列表失败。',
+      }));
+    }
+  }, [rootConfig]);
+
   const openLoginModal = useCallback(() => {
     setUserModalMode('login');
     setUserModalError('');
@@ -1737,7 +1783,8 @@ export default function App() {
     setPasswordForm(createPasswordFormState());
     syncUserPreferenceForm(rootConfig);
     void loadFinanceLedger(1);
-  }, [loadFinanceLedger, rootConfig, syncUserPreferenceForm]);
+    void loadCanvasUserApiKeys();
+  }, [loadCanvasUserApiKeys, loadFinanceLedger, rootConfig, syncUserPreferenceForm]);
 
   const openSettingsModal = useCallback(() => {
     setUserModalMode('settings');
@@ -1748,6 +1795,7 @@ export default function App() {
 
   const userDisplayName = String(rootConfig.currentUsername || rootConfig.currentUserEmail || '用户').trim();
   const generatedGatewayApiKey = String(rootConfig.authToken || '').trim();
+  const canvasUserApiKeys = apiKeyListState.apiKeys;
   const isSettingsEntryMode = String(rootConfig?.userControl?.entryMode || '').trim() === 'settings';
   const gatewayImagesGenerationsEndpoint = String(rootConfig?.userControl?.imagesGenerationsEndpoint || '').trim();
   const gatewayImagesEditsEndpoint = String(rootConfig?.userControl?.imagesEditsEndpoint || '').trim();
@@ -2161,6 +2209,7 @@ export default function App() {
     try {
       await regenerateCanvasUserApiKey(rootConfig);
       await refreshCanvasSession();
+      await loadCanvasUserApiKeys();
       setUserModalSuccess('新的 API 密钥已生成。');
       appendHistory(setHistory, '用户已重置 API 密钥。');
     } catch (error) {
@@ -2168,7 +2217,7 @@ export default function App() {
     } finally {
       setUserActionPending(false);
     }
-  }, [refreshCanvasSession, rootConfig]);
+  }, [loadCanvasUserApiKeys, refreshCanvasSession, rootConfig]);
 
   const handleSaveApiKeySettings = useCallback(async (event) => {
     event.preventDefault();
@@ -2198,6 +2247,40 @@ export default function App() {
       setUserModalError(error?.message || '复制 API 密钥失败。');
     }
   }, [generatedGatewayApiKey]);
+
+  const handleCopyCanvasUserApiKey = useCallback(async (apiKey) => {
+    const rawKey = String(apiKey?.rawKey || '').trim();
+    if (!rawKey) {
+      setUserModalError('该 API 密钥未保存完整密钥，无法复制。');
+      return;
+    }
+    try {
+      await copyPlainText(rawKey);
+      setUserModalSuccess(`已复制“${apiKey.name}”。`);
+    } catch (error) {
+      setUserModalError(error?.message || '复制 API 密钥失败。');
+    }
+  }, []);
+
+  const handleSetCanvasDefaultApiKey = useCallback(async (apiKey) => {
+    if (!apiKey?.id || apiKey.status !== 'active') {
+      return;
+    }
+    setUserActionPending(true);
+    setUserModalError('');
+    setUserModalSuccess('');
+    try {
+      await setCanvasUserDefaultApiKey(rootConfig, apiKey.id);
+      await refreshCanvasSession();
+      await loadCanvasUserApiKeys();
+      setUserModalSuccess(`已将“${apiKey.name}”设为画布默认密钥。`);
+      appendHistory(setHistory, '用户已切换画布默认 API 密钥。');
+    } catch (error) {
+      setUserModalError(error?.message || '设置画布默认 API 密钥失败。');
+    } finally {
+      setUserActionPending(false);
+    }
+  }, [loadCanvasUserApiKeys, refreshCanvasSession, rootConfig]);
 
   const updateNodeData = useCallback(
     (nodeId, patch) => {
@@ -4895,6 +4978,40 @@ export default function App() {
                           <span>{userActionPending ? '处理中...' : '重新生成'}</span>
                         </button>
                       </div>
+                      <div className="canvas-user-key-list-head">
+                        <strong>账户全部 API 密钥</strong>
+                        <span>后台为当前账户新增的密钥会同步显示在这里。画布任务和下方 API 偏好始终使用标记为“画布默认”的一把。</span>
+                      </div>
+                      {apiKeyListState.error ? <div className="canvas-user-inline-note is-error"><span>{apiKeyListState.error}</span></div> : null}
+                      <div className="canvas-user-key-list">
+                        {canvasUserApiKeys.map((apiKey) => (
+                          <article key={apiKey.id} className={`canvas-user-key-item ${apiKey.isDefault ? 'is-default' : ''}`}>
+                            <div className="canvas-user-key-item-head">
+                              <div>
+                                <strong>{apiKey.name}</strong>
+                                <span>{apiKey.id}</span>
+                              </div>
+                              <div className="canvas-user-key-badges">
+                                {apiKey.isDefault ? <b>画布默认</b> : null}
+                                <em className={apiKey.status === 'active' ? 'is-active' : ''}>{apiKey.status === 'active' ? '可用' : '已停用'}</em>
+                              </div>
+                            </div>
+                            <code>{apiKey.rawKey || apiKey.maskedKey || '未保存完整密钥'}</code>
+                            <div className="canvas-user-actions">
+                              <button type="button" className="tool-pill" onClick={() => void handleCopyCanvasUserApiKey(apiKey)} disabled={userActionPending || !apiKey.rawKey}>
+                                <span>复制密钥</span>
+                              </button>
+                              {!apiKey.isDefault ? (
+                                <button type="button" className="tool-pill" onClick={() => void handleSetCanvasDefaultApiKey(apiKey)} disabled={userActionPending || apiKey.status !== 'active' || !apiKey.rawKey}>
+                                  <span>设为画布默认</span>
+                                </button>
+                              ) : null}
+                            </div>
+                          </article>
+                        ))}
+                        {!apiKeyListState.loading && !canvasUserApiKeys.length ? <span className="canvas-user-key-list-empty">当前账户还没有可展示的 API 密钥。</span> : null}
+                        {apiKeyListState.loading ? <span className="canvas-user-key-list-empty">正在同步账户密钥…</span> : null}
+                      </div>
                     </section>
 
                     <section className="canvas-user-panel canvas-user-panel--stack">
@@ -4920,8 +5037,8 @@ export default function App() {
 
                     <section className="canvas-user-panel canvas-user-panel--stack">
                       <div className="canvas-user-panel-head">
-                        <strong>API 偏好</strong>
-                        <span>如果你不确定怎么选，保持默认即可。</span>
+                        <strong>画布默认密钥偏好</strong>
+                        <span>这些设置仅作用于当前标记为“画布默认”的 API 密钥；切换默认密钥后会自动同步对应设置。</span>
                       </div>
                       <form className="canvas-user-form canvas-user-form--compact canvas-user-form-grid canvas-user-form-grid--2" onSubmit={handleSaveApiKeySettings}>
                         <label className="canvas-user-field">

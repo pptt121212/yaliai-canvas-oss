@@ -50,6 +50,8 @@ const DEFAULT_RUNTIME = {
     apiKeySettingsEndpoint: '',
     financeLedgerEndpoint: '',
     regenerateApiKeyEndpoint: '',
+    apiKeysEndpoint: '',
+    defaultApiKeyEndpoint: '',
   },
   credentialsMode: 'same-origin',
 };
