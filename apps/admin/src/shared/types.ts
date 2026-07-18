@@ -16,6 +16,9 @@ export type AdminControlPlaneConfig = {
     authMode: 'admin_key' | 'tenant_key' | 'disabled';
     rateLimitPerMinute: number;
     maxConcurrency: number;
+    maxInputImageMb: number;
+    maxInputImageCount: number;
+    maxInputImageTotalMb: number;
     exposeGenerations: boolean;
     exposeEdits: boolean;
     overloadGuardEnabled: boolean;

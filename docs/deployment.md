@@ -175,14 +175,15 @@ Important runtime tuning variables:
 | `PM2_API_INSTANCES` | `2` | Number of clustered API processes. |
 | `PG_POOL_MAX` | `12` | PostgreSQL pool size per process. |
 | `API_REQUEST_BODY_LIMIT_BYTES` | `134217728` | Downstream request body limit. Match Nginx `client_max_body_size`. |
-| `IMAGE_PAYLOAD_MAX_BYTES` | `12582912` | Max input image payload size used by image workflows. |
-| `IMAGE_INPUT_MAX_COUNT` | `6` | Max reference image count. |
+| `IMAGE_PAYLOAD_MAX_BYTES` | `12582912` | Absolute hard cap for one input image. It cannot exceed 12MiB. |
 | `UPSTREAM_JSON_RESPONSE_MAX_BYTES` | `100663296` | Max upstream JSON response size. |
 | `UPSTREAM_BINARY_RESPONSE_MAX_BYTES` | `67108864` | Max upstream binary response size. |
 | `ASYNC_IMAGE_QUEUE_MAX` | `200` | Global async image queue cap. |
 | `ASYNC_IMAGE_QUEUE_PER_API_KEY_MAX` | `20` | Per-key async queue cap. |
 | `IMAGE_PERSISTENCE_OUTBOX_ENABLED` | `true` | Persist successful image task metadata outside the response hot path. |
 | `OPERATIONAL_ROLLUP_ENABLED` | unset | Set to `false` to hard-disable operational rollup reports. |
+
+Reference image limits are configured in the Admin Overview page under "Downstream API": single-image size, image count, and total decoded input size. Defaults are `12MiB`, `6`, and `30MiB`; these are also hard maximums, so a deployment can tighten them but cannot loosen them beyond the built-in safety boundary.
 | `GENERATED_IMAGE_ACCEL_REDIRECT_TARGET_DIR` | unset | Enable Nginx internal acceleration when it matches the generated-image directory. |
 
 ## 7. PM2 Process Model

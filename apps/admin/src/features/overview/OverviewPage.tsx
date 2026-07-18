@@ -309,6 +309,27 @@ export function OverviewPage({
                   <InputNumber min={0} style={{ width: '100%' }} />
                 </Form.Item>
                 <Form.Item
+                  name={['publicApi', 'maxInputImageMb']}
+                  label="单张参考图大小（MB）"
+                  extra="最多 12MB，适用于 Base64、URL 下载和 multipart 文件。"
+                >
+                  <InputNumber min={1} max={12} step={1} style={{ width: '100%' }} />
+                </Form.Item>
+                <Form.Item
+                  name={['publicApi', 'maxInputImageCount']}
+                  label="单次参考图数量"
+                  extra="最多 6 张；用于图生图、多参考图和 multipart 上传。"
+                >
+                  <InputNumber min={1} max={6} style={{ width: '100%' }} />
+                </Form.Item>
+                <Form.Item
+                  name={['publicApi', 'maxInputImageTotalMb']}
+                  label="单次参考图总大小（MB）"
+                  extra="所有参考图解码后的合计大小，最多 30MB。"
+                >
+                  <InputNumber min={1} max={30} step={1} style={{ width: '100%' }} />
+                </Form.Item>
+                <Form.Item
                   name={['publicApi', 'overloadGuardEnabled']}
                   label="动态过载保护"
                   valuePropName="checked"

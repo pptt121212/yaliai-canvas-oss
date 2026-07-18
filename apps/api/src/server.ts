@@ -149,15 +149,20 @@ const operationalRollupIntervalMs = Math.max(15 * 60 * 1000, Number(process.env.
 const operationalRollupLookbackDays = Math.max(1, Math.min(90, Number(process.env.OPERATIONAL_ROLLUP_LOOKBACK_DAYS || 14)));
 const operationalRollupBucketMs = Math.max(60 * 60 * 1000, Number(process.env.OPERATIONAL_ROLLUP_BUCKET_MS || 24 * 60 * 60 * 1000));
 const operationalRollupLockMs = Math.max(5 * 60 * 1000, Number(process.env.OPERATIONAL_ROLLUP_LOCK_MS || 30 * 60 * 1000));
-const maxImagePayloadBytes = Math.max(1 * 1024 * 1024, Number(process.env.IMAGE_PAYLOAD_MAX_BYTES || 12 * 1024 * 1024));
-const maxInputImageCount = Math.max(1, Number(process.env.IMAGE_INPUT_MAX_COUNT || 6));
+const hardMaxInputImagePayloadBytes = 12 * 1024 * 1024;
+const maxImagePayloadBytes = Math.max(
+  1 * 1024 * 1024,
+  Math.min(hardMaxInputImagePayloadBytes, Number(process.env.IMAGE_PAYLOAD_MAX_BYTES || hardMaxInputImagePayloadBytes)),
+);
+const hardMaxInputImageCount = 6;
+const hardMaxInputImageTotalBytes = 30 * 1024 * 1024;
 const maxUpstreamJsonResponseBytes = Math.max(1 * 1024 * 1024, Number(process.env.UPSTREAM_JSON_RESPONSE_MAX_BYTES || 96 * 1024 * 1024));
 const maxUpstreamBinaryResponseBytes = Math.max(1 * 1024 * 1024, Number(process.env.UPSTREAM_BINARY_RESPONSE_MAX_BYTES || 64 * 1024 * 1024));
 await app.register(multipart, {
   limits: {
     fileSize: maxImagePayloadBytes,
-    files: maxInputImageCount + 1,
-    parts: maxInputImageCount + 32,
+    files: hardMaxInputImageCount,
+    parts: hardMaxInputImageCount + 32,
   },
 });
 const concurrencyService = createConcurrencyService(hotStateStore);
@@ -213,9 +218,9 @@ const openAIImagesSchema = z.object({
   n: z.number().int().positive().max(10).optional(),
   async: z.boolean().optional(),
   user: z.string().optional(),
-  image: z.union([imageInputValueSchema, z.array(imageInputValueSchema).max(maxInputImageCount)]).optional(),
-  reference_images: z.array(referenceImageInputValueSchema).max(maxInputImageCount).optional(),
-  reference_image_instructions: z.union([z.string(), z.array(z.string()).max(maxInputImageCount)]).optional(),
+  image: z.union([imageInputValueSchema, z.array(imageInputValueSchema).max(hardMaxInputImageCount)]).optional(),
+  reference_images: z.array(referenceImageInputValueSchema).max(hardMaxInputImageCount).optional(),
+  reference_image_instructions: z.union([z.string(), z.array(z.string()).max(hardMaxInputImageCount)]).optional(),
   prioritize_first_reference_image: z.boolean().optional(),
   stream: z.boolean().optional(),
   output_format: z.string().optional(),
@@ -266,12 +271,63 @@ const compatibleAspectResolutionSizeMap: Record<string, Record<'1k' | '2k' | '4k
   '9:21': { '1k': '864x2016', '2k': '1152x2688', '4k': '1648x3840' },
 };
 
-function createImagePayloadTooLargeError(receivedBytes: number) {
+type ImageInputLimits = {
+  maxCount: number;
+  maxImageBytes: number;
+  maxTotalBytes: number;
+};
+
+type ImageInputByteBudget = ImageInputLimits & {
+  totalBytes: number;
+};
+
+function getImageInputLimits(): ImageInputLimits {
+  const publicApi = adminControlPlaneStore.get().publicApi;
+  return {
+    maxCount: Math.max(1, Math.min(hardMaxInputImageCount, Math.floor(Number(publicApi.maxInputImageCount || hardMaxInputImageCount)))),
+    maxImageBytes: Math.max(
+      1 * 1024 * 1024,
+      Math.min(maxImagePayloadBytes, Math.floor(Number(publicApi.maxInputImageMb || 12) * 1024 * 1024)),
+    ),
+    maxTotalBytes: Math.max(
+      1 * 1024 * 1024,
+      Math.min(hardMaxInputImageTotalBytes, Math.floor(Number(publicApi.maxInputImageTotalMb || 30) * 1024 * 1024)),
+    ),
+  };
+}
+
+function createImageInputByteBudget(): ImageInputByteBudget {
+  return {
+    ...getImageInputLimits(),
+    totalBytes: 0,
+  };
+}
+
+function createInputImageTotalTooLargeError(receivedBytes: number, maxBytes: number) {
+  const error = new Error('Combined input image payload exceeds maximum size.');
+  (error as Error & { statusCode?: number; code?: string; details?: Record<string, unknown> }).statusCode = 413;
+  (error as Error & { statusCode?: number; code?: string; details?: Record<string, unknown> }).code = 'input_image_total_too_large';
+  (error as Error & { statusCode?: number; code?: string; details?: Record<string, unknown> }).details = {
+    max_input_image_total_bytes: maxBytes,
+    received_input_image_total_bytes: receivedBytes,
+  };
+  return error;
+}
+
+function consumeImageInputBytes(budget: ImageInputByteBudget, bytes: number) {
+  const nextTotalBytes = budget.totalBytes + Math.max(0, bytes);
+  if (nextTotalBytes > budget.maxTotalBytes) {
+    throw createInputImageTotalTooLargeError(nextTotalBytes, budget.maxTotalBytes);
+  }
+  budget.totalBytes = nextTotalBytes;
+}
+
+function createImagePayloadTooLargeError(receivedBytes: number, maxBytes = getImageInputLimits().maxImageBytes) {
   const error = new Error('Image payload exceeds maximum size.');
   (error as Error & { statusCode?: number; code?: string; details?: Record<string, unknown> }).statusCode = 413;
   (error as Error & { statusCode?: number; code?: string; details?: Record<string, unknown> }).code = 'image_payload_too_large';
   (error as Error & { statusCode?: number; code?: string; details?: Record<string, unknown> }).details = {
-    max_image_payload_bytes: maxImagePayloadBytes,
+    max_image_payload_bytes: maxBytes,
     received_image_payload_bytes: receivedBytes,
   };
   return error;
@@ -322,19 +378,23 @@ function parseMultipartScalarValue(fieldName: string, rawValue: unknown) {
   return value;
 }
 
-async function readMultipartFilePartAsDataUrl(part: any) {
+async function readMultipartFilePartAsDataUrl(part: any, budget: ImageInputByteBudget) {
   const chunks: Buffer[] = [];
   let totalBytes = 0;
   for await (const chunk of part.file) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     totalBytes += buffer.length;
-    if (totalBytes > maxImagePayloadBytes) {
-      throw createImagePayloadTooLargeError(totalBytes);
+    if (totalBytes > budget.maxImageBytes) {
+      throw createImagePayloadTooLargeError(totalBytes, budget.maxImageBytes);
+    }
+    if (budget.totalBytes + totalBytes > budget.maxTotalBytes) {
+      throw createInputImageTotalTooLargeError(budget.totalBytes + totalBytes, budget.maxTotalBytes);
     }
     chunks.push(buffer);
   }
   const buffer = Buffer.concat(chunks);
-  assertBufferWithinLimit(buffer, 'multipart ingress image');
+  assertBufferWithinLimit(buffer, 'multipart ingress image', budget.maxImageBytes);
+  consumeImageInputBytes(budget, buffer.length);
   const extension = detectImageExtensionFromBuffer(buffer);
   return `data:${contentTypeForExtension(extension)};base64,${buffer.toString('base64')}`;
 }
@@ -342,6 +402,7 @@ async function readMultipartFilePartAsDataUrl(part: any) {
 async function parseMultipartOpenAIImagesBody(request: any) {
   const payload: Record<string, unknown> = {};
   const imageValues: string[] = [];
+  const imageBudget = createImageInputByteBudget();
 
   for await (const part of request.parts()) {
     const fieldName = normalizeMultipartImageFieldName(part.fieldname || '');
@@ -350,7 +411,7 @@ async function parseMultipartOpenAIImagesBody(request: any) {
     }
 
     if (part.type === 'file') {
-      const dataUrl = await readMultipartFilePartAsDataUrl(part);
+      const dataUrl = await readMultipartFilePartAsDataUrl(part, imageBudget);
       if (fieldName === 'image' || fieldName === 'image_url' || fieldName === 'image_urls' || fieldName === 'reference_images') {
         imageValues.push(dataUrl);
         continue;
@@ -701,17 +762,38 @@ function countImageInputs(payload: z.infer<typeof openAIImagesSchema>) {
   return Array.isArray(payload.image) ? payload.image.length : 1;
 }
 
+function inlineImagePayloadBytes(value: unknown) {
+  const raw = String(value || '').trim();
+  const dataUrlMatch = raw.match(/^data:image\/[a-zA-Z0-9.+-]+;base64,([A-Za-z0-9+/=\s]+)$/i);
+  if (dataUrlMatch) {
+    return estimateBase64DecodedBytes(dataUrlMatch[1]);
+  }
+  return isLikelyRawBase64(raw) ? estimateBase64DecodedBytes(raw) : 0;
+}
+
 function validateOpenAIImagesPayloadLimits(payload: z.infer<typeof openAIImagesSchema>) {
+  const limits = getImageInputLimits();
   const imageCount = countImageInputs(payload);
-  if (imageCount > maxInputImageCount) {
-    const error = new Error(`A single image request can include at most ${maxInputImageCount} input images.`);
+  if (imageCount > limits.maxCount) {
+    const error = new Error(`A single image request can include at most ${limits.maxCount} input images.`);
     (error as Error & { statusCode?: number; code?: string; details?: Record<string, unknown> }).statusCode = 400;
     (error as Error & { statusCode?: number; code?: string; details?: Record<string, unknown> }).code = 'too_many_input_images';
     (error as Error & { statusCode?: number; code?: string; details?: Record<string, unknown> }).details = {
-      max_input_images: maxInputImageCount,
+      max_input_images: limits.maxCount,
       received_input_images: imageCount,
     };
     throw error;
+  }
+  const images = payload.image ? (Array.isArray(payload.image) ? payload.image : [payload.image]) : [];
+  const totalBytes = images.reduce((sum, image) => {
+    const bytes = inlineImagePayloadBytes(image);
+    if (bytes > limits.maxImageBytes) {
+      throw createImagePayloadTooLargeError(bytes, limits.maxImageBytes);
+    }
+    return sum + bytes;
+  }, 0);
+  if (totalBytes > limits.maxTotalBytes) {
+    throw createInputImageTotalTooLargeError(totalBytes, limits.maxTotalBytes);
   }
 }
 
@@ -2117,19 +2199,20 @@ async function normalizeIncomingImagePayloadReferences(request: any, payload: z.
   return nextPayload;
 }
 
-async function normalizeImageInputValueToDataUrl(value: string) {
+async function normalizeImageInputValueToDataUrl(value: string, budget: ImageInputByteBudget) {
   const raw = String(value || '').trim();
   if (!raw) {
     return raw;
   }
   const decoded = decodeImagePayloadToBase64(raw);
   if (decoded?.base64) {
+    consumeImageInputBytes(budget, estimateBase64DecodedBytes(decoded.base64));
     return `data:${contentTypeForExtension(decoded.extension)};base64,${decoded.base64}`;
   }
   if (!isHttpUrl(raw)) {
     return raw;
   }
-  const fetched = await fetchImageUrlAsBase64(raw);
+  const fetched = await fetchImageUrlAsBase64(raw, budget);
   return `data:${contentTypeForExtension(fetched.extension)};base64,${fetched.base64}`;
 }
 
@@ -2141,8 +2224,9 @@ async function normalizeIncomingImagePayloadReferencesToDataUrl(payload: z.infer
   if (payload.image) {
     const images = Array.isArray(payload.image) ? payload.image : [payload.image];
     const normalizedImages: string[] = [];
+    const imageBudget = createImageInputByteBudget();
     for (const image of images) {
-      normalizedImages.push(await normalizeImageInputValueToDataUrl(String(image || '')));
+      normalizedImages.push(await normalizeImageInputValueToDataUrl(String(image || ''), imageBudget));
     }
     nextPayload.image = Array.isArray(payload.image) ? normalizedImages : normalizedImages[0];
   }
@@ -2231,25 +2315,29 @@ async function adaptPayloadForProvider(input: {
   return normalizeIncomingImagePayloadReferencesPreservingUrls(payload);
 }
 
-async function fetchImageUrlAsBase64(url: string) {
+async function fetchImageUrlAsBase64(url: string, budget?: ImageInputByteBudget) {
+  const maxBytes = budget?.maxImageBytes || maxImagePayloadBytes;
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`Failed to fetch image URL: HTTP ${response.status}`);
   }
   const contentLength = Number(response.headers.get('content-length') || 0);
-  if (contentLength > maxImagePayloadBytes) {
+  if (contentLength > maxBytes) {
     const error = new Error('Image URL source exceeds maximum payload size.');
     (error as Error & { statusCode?: number; code?: string; details?: Record<string, unknown> }).statusCode = 413;
     (error as Error & { statusCode?: number; code?: string; details?: Record<string, unknown> }).code = 'image_payload_too_large';
     (error as Error & { statusCode?: number; code?: string; details?: Record<string, unknown> }).details = {
-      max_image_payload_bytes: maxImagePayloadBytes,
+      max_image_payload_bytes: maxBytes,
       received_image_payload_bytes: contentLength,
     };
     throw error;
   }
   const arrayBuffer = await response.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
-  assertBufferWithinLimit(buffer, 'image URL source');
+  assertBufferWithinLimit(buffer, 'image URL source', maxBytes);
+  if (budget) {
+    consumeImageInputBytes(budget, buffer.length);
+  }
   return {
     base64: buffer.toString('base64'),
     extension: detectImageExtensionFromBuffer(buffer),
@@ -2287,7 +2375,13 @@ function fallbackMultipartFileName(fieldName: string, index: number, extension: 
   return `reference-${index + 1}.${safeExtension}`;
 }
 
-async function buildMultipartFilePart(value: string, preferredFileName: string | undefined, fieldName: string, index: number) {
+async function buildMultipartFilePart(
+  value: string,
+  preferredFileName: string | undefined,
+  fieldName: string,
+  index: number,
+  budget: ImageInputByteBudget,
+) {
   const raw = String(value || '').trim();
   if (!raw) {
     return null;
@@ -2299,19 +2393,20 @@ async function buildMultipartFilePart(value: string, preferredFileName: string |
       throw new Error(`Failed to fetch multipart image source: HTTP ${response.status}`);
     }
     const contentLength = Number(response.headers.get('content-length') || 0);
-    if (contentLength > maxImagePayloadBytes) {
+    if (contentLength > budget.maxImageBytes) {
       const error = new Error('Multipart image source exceeds maximum payload size.');
       (error as Error & { statusCode?: number; code?: string; details?: Record<string, unknown> }).statusCode = 413;
       (error as Error & { statusCode?: number; code?: string; details?: Record<string, unknown> }).code = 'image_payload_too_large';
       (error as Error & { statusCode?: number; code?: string; details?: Record<string, unknown> }).details = {
-        max_image_payload_bytes: maxImagePayloadBytes,
+        max_image_payload_bytes: budget.maxImageBytes,
         received_image_payload_bytes: contentLength,
       };
       throw error;
     }
     const arrayBuffer = await response.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
-    assertBufferWithinLimit(buffer, 'multipart image source');
+    assertBufferWithinLimit(buffer, 'multipart image source', budget.maxImageBytes);
+    consumeImageInputBytes(budget, buffer.length);
     const extension = detectImageExtensionFromBuffer(buffer);
     return {
       blob: new Blob([buffer], { type: contentTypeForExtension(extension) }),
@@ -2322,7 +2417,8 @@ async function buildMultipartFilePart(value: string, preferredFileName: string |
   const decoded = decodeImagePayloadToBase64(raw);
   if (decoded?.base64) {
     const buffer = Buffer.from(decoded.base64, 'base64');
-    assertBufferWithinLimit(buffer, 'multipart image base64 source');
+    assertBufferWithinLimit(buffer, 'multipart image base64 source', budget.maxImageBytes);
+    consumeImageInputBytes(budget, buffer.length);
     return {
       blob: new Blob([buffer], { type: contentTypeForExtension(decoded.extension) }),
       fileName: String(preferredFileName || '').trim() || fallbackMultipartFileName(fieldName, index, decoded.extension),
@@ -2342,6 +2438,7 @@ async function buildUpstreamFetchBody(plan: {
   }
 
   const form = new FormData();
+  const imageBudget = createImageInputByteBudget();
   for (const [key, value] of Object.entries(plan.body || {})) {
     if (value === undefined || value === null) {
       continue;
@@ -2351,7 +2448,7 @@ async function buildUpstreamFetchBody(plan: {
       const expectedFileNames = Array.isArray(plan.multipartFileNames?.[key]) ? plan.multipartFileNames?.[key] : [];
       for (const [index, item] of values.entries()) {
         if (typeof item === 'string') {
-          const part = await buildMultipartFilePart(item, expectedFileNames[index], key, index);
+          const part = await buildMultipartFilePart(item, expectedFileNames[index], key, index, imageBudget);
           if (part) {
             form.append(key, part.blob, part.fileName);
           } else {
@@ -8343,7 +8440,8 @@ function validateCanvasWorkflowInputConstraints(nodes: CanvasNode[], edges: Canv
       .filter((source): source is CanvasNode => Boolean(source))
       .filter((source) => canvasReferenceSourceTypes.has(source.type) && hasCanvasReferenceValue(source))
       .length;
-    if (directReferenceCount > maxInputImageCount) {
+    const maxReferenceCount = getImageInputLimits().maxCount;
+    if (directReferenceCount > maxReferenceCount) {
       const error = new Error(`Canvas node ${getCanvasNodeLabel(node)} exceeds the maximum direct reference image count.`);
       (error as Error & { statusCode?: number; code?: string; details?: Record<string, unknown> }).statusCode = 400;
       (error as Error & { statusCode?: number; code?: string; details?: Record<string, unknown> }).code = 'canvas_reference_limit_exceeded';
@@ -8351,7 +8449,7 @@ function validateCanvasWorkflowInputConstraints(nodes: CanvasNode[], edges: Canv
         node_id: node.id,
         node_type: node.type,
         direct_reference_count: directReferenceCount,
-        max_reference_count: maxInputImageCount,
+        max_reference_count: maxReferenceCount,
       };
       throw error;
     }

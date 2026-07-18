@@ -17,6 +17,9 @@ export type PublicApiConfig = {
   authMode: 'admin_key' | 'tenant_key' | 'disabled';
   rateLimitPerMinute: number;
   maxConcurrency: number;
+  maxInputImageMb: number;
+  maxInputImageCount: number;
+  maxInputImageTotalMb: number;
   exposeGenerations: boolean;
   exposeEdits: boolean;
   overloadGuardEnabled: boolean;
@@ -77,6 +80,9 @@ const defaultControlPlaneConfig: AdminControlPlaneConfig = {
     authMode: 'tenant_key',
     rateLimitPerMinute: 3000,
     maxConcurrency: 120,
+    maxInputImageMb: 12,
+    maxInputImageCount: 6,
+    maxInputImageTotalMb: 30,
     exposeGenerations: true,
     exposeEdits: true,
     overloadGuardEnabled: false,
@@ -130,6 +136,18 @@ function mergeWithDefaults(input: Partial<AdminControlPlaneConfig> | null | unde
         : defaultControlPlaneConfig.publicApi.authMode,
       rateLimitPerMinute: Math.max(0, Math.floor(Number(publicApi.rateLimitPerMinute ?? defaultControlPlaneConfig.publicApi.rateLimitPerMinute))),
       maxConcurrency: Math.max(0, Math.floor(Number(publicApi.maxConcurrency ?? defaultControlPlaneConfig.publicApi.maxConcurrency))),
+      maxInputImageMb: Math.max(
+        1,
+        Math.min(12, Number(publicApi.maxInputImageMb ?? defaultControlPlaneConfig.publicApi.maxInputImageMb)),
+      ),
+      maxInputImageCount: Math.max(
+        1,
+        Math.min(6, Math.floor(Number(publicApi.maxInputImageCount ?? defaultControlPlaneConfig.publicApi.maxInputImageCount))),
+      ),
+      maxInputImageTotalMb: Math.max(
+        1,
+        Math.min(30, Number(publicApi.maxInputImageTotalMb ?? defaultControlPlaneConfig.publicApi.maxInputImageTotalMb)),
+      ),
       exposeGenerations: typeof publicApi.exposeGenerations === 'boolean'
         ? publicApi.exposeGenerations
         : defaultControlPlaneConfig.publicApi.exposeGenerations,
