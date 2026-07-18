@@ -19,6 +19,10 @@ export type PublicApiConfig = {
   maxConcurrency: number;
   exposeGenerations: boolean;
   exposeEdits: boolean;
+  overloadGuardEnabled: boolean;
+  overloadGuardMinAvailableMemoryRatio: number;
+  overloadGuardMaxCpuLoadRatio: number;
+  overloadGuardMaxEventLoopDelayMs: number;
 };
 
 export type CanvasPolicyConfig = {
@@ -75,6 +79,10 @@ const defaultControlPlaneConfig: AdminControlPlaneConfig = {
     maxConcurrency: 120,
     exposeGenerations: true,
     exposeEdits: true,
+    overloadGuardEnabled: false,
+    overloadGuardMinAvailableMemoryRatio: 0.15,
+    overloadGuardMaxCpuLoadRatio: 0.85,
+    overloadGuardMaxEventLoopDelayMs: 250,
   },
   canvas: {
     allowUserSuppliedProviders: true,
@@ -128,6 +136,21 @@ function mergeWithDefaults(input: Partial<AdminControlPlaneConfig> | null | unde
       exposeEdits: typeof publicApi.exposeEdits === 'boolean'
         ? publicApi.exposeEdits
         : defaultControlPlaneConfig.publicApi.exposeEdits,
+      overloadGuardEnabled: typeof publicApi.overloadGuardEnabled === 'boolean'
+        ? publicApi.overloadGuardEnabled
+        : defaultControlPlaneConfig.publicApi.overloadGuardEnabled,
+      overloadGuardMinAvailableMemoryRatio: Math.max(
+        0.03,
+        Math.min(0.8, Number(publicApi.overloadGuardMinAvailableMemoryRatio ?? defaultControlPlaneConfig.publicApi.overloadGuardMinAvailableMemoryRatio)),
+      ),
+      overloadGuardMaxCpuLoadRatio: Math.max(
+        0.1,
+        Math.min(2, Number(publicApi.overloadGuardMaxCpuLoadRatio ?? defaultControlPlaneConfig.publicApi.overloadGuardMaxCpuLoadRatio)),
+      ),
+      overloadGuardMaxEventLoopDelayMs: Math.max(
+        25,
+        Math.min(10_000, Math.floor(Number(publicApi.overloadGuardMaxEventLoopDelayMs ?? defaultControlPlaneConfig.publicApi.overloadGuardMaxEventLoopDelayMs))),
+      ),
     },
     canvas: {
       allowUserSuppliedProviders: typeof canvas.allowUserSuppliedProviders === 'boolean'
@@ -217,6 +240,17 @@ const postgresControlPlaneRepository = hasDatabaseUrl()
 let controlPlaneCache = postgresControlPlaneRepository ? defaultControlPlaneConfig : controlPlaneStore.read();
 let controlPlaneRefreshPromise: Promise<AdminControlPlaneConfig> | null = null;
 let controlPlaneListenerStarted = false;
+const controlPlaneSubscribers = new Set<(config: AdminControlPlaneConfig) => void>();
+
+function notifyControlPlaneSubscribers(config: AdminControlPlaneConfig) {
+  for (const subscriber of controlPlaneSubscribers) {
+    try {
+      subscriber(config);
+    } catch {
+      // Runtime observers must not prevent a configuration refresh.
+    }
+  }
+}
 
 async function refreshControlPlaneCache() {
   if (controlPlaneRefreshPromise) {
@@ -225,9 +259,11 @@ async function refreshControlPlaneCache() {
   controlPlaneRefreshPromise = (async () => {
     if (postgresControlPlaneRepository) {
       controlPlaneCache = mergeWithDefaults(await postgresControlPlaneRepository.get());
+      notifyControlPlaneSubscribers(controlPlaneCache);
       return controlPlaneCache;
     }
     controlPlaneCache = controlPlaneStore.read();
+    notifyControlPlaneSubscribers(controlPlaneCache);
     return controlPlaneCache;
   })();
   try {
@@ -261,6 +297,7 @@ export const adminControlPlaneStore: ControlPlaneRepository & {
   },
   save(config: AdminControlPlaneConfig) {
     writeConfig(config);
+    notifyControlPlaneSubscribers(controlPlaneCache);
     return readConfig();
   },
   async refreshAsync() {
@@ -271,10 +308,13 @@ export const adminControlPlaneStore: ControlPlaneRepository & {
     controlPlaneCache = next;
     if (postgresControlPlaneRepository) {
       await postgresControlPlaneRepository.save(next);
+      notifyControlPlaneSubscribers(controlPlaneCache);
       return controlPlaneCache;
     }
     controlPlaneStore.write(next);
-    return controlPlaneStore.read();
+    controlPlaneCache = controlPlaneStore.read();
+    notifyControlPlaneSubscribers(controlPlaneCache);
+    return controlPlaneCache;
   },
   getStorageInfo() {
     const filePath = postgresControlPlaneRepository
@@ -286,6 +326,11 @@ export const adminControlPlaneStore: ControlPlaneRepository & {
     };
   },
 };
+
+export function subscribeAdminControlPlane(listener: (config: AdminControlPlaneConfig) => void) {
+  controlPlaneSubscribers.add(listener);
+  return () => controlPlaneSubscribers.delete(listener);
+}
 
 export const providerAdapterCatalog = [
   {

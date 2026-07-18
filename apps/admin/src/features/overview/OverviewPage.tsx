@@ -308,6 +308,23 @@ export function OverviewPage({
                 >
                   <InputNumber min={0} style={{ width: '100%' }} />
                 </Form.Item>
+                <Form.Item
+                  name={['publicApi', 'overloadGuardEnabled']}
+                  label="动态过载保护"
+                  valuePropName="checked"
+                  extra="默认关闭。开启后会按本机或容器实际 CPU、内存与事件循环延迟拒绝新的图像请求。"
+                >
+                  <Switch checkedChildren="开启" unCheckedChildren="关闭" />
+                </Form.Item>
+                <Form.Item name={['publicApi', 'overloadGuardMinAvailableMemoryRatio']} label="最低可用内存比例">
+                  <InputNumber min={0.03} max={0.8} step={0.01} style={{ width: '100%' }} />
+                </Form.Item>
+                <Form.Item name={['publicApi', 'overloadGuardMaxCpuLoadRatio']} label="最高 CPU 负载比例">
+                  <InputNumber min={0.1} max={2} step={0.05} style={{ width: '100%' }} />
+                </Form.Item>
+                <Form.Item name={['publicApi', 'overloadGuardMaxEventLoopDelayMs']} label="最高事件循环延迟（毫秒）">
+                  <InputNumber min={25} max={10000} style={{ width: '100%' }} />
+                </Form.Item>
                 <Form.Item name={['publicApi', 'defaultResponseFormat']} label="默认返回格式">
                   <Select options={[{ value: 'url', label: 'URL' }, { value: 'b64_json', label: 'Base64' }]} />
                 </Form.Item>

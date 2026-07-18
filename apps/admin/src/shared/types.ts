@@ -18,6 +18,10 @@ export type AdminControlPlaneConfig = {
     maxConcurrency: number;
     exposeGenerations: boolean;
     exposeEdits: boolean;
+    overloadGuardEnabled: boolean;
+    overloadGuardMinAvailableMemoryRatio: number;
+    overloadGuardMaxCpuLoadRatio: number;
+    overloadGuardMaxEventLoopDelayMs: number;
   };
   canvas: {
     allowUserSuppliedProviders: boolean;

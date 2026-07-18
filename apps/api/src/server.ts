@@ -35,6 +35,7 @@ import {
   type BillingAuditImageRecord,
 } from './modules/imageResolutionAudit.js';
 import { resolveImageCapabilityCost } from './modules/imageCapabilityMatrix.js';
+import { dynamicOverloadGuard } from './modules/runtime/dynamicOverloadGuard.js';
 import { startOperationalRollupScheduler } from './modules/operationalRollups.js';
 import {
   appendAuditRecord,
@@ -43,7 +44,11 @@ import {
   upsertTaskRecord,
 } from './modules/storage/operationalService.js';
 import { operationalRepository } from './modules/storage/operationalStore.js';
-import { adminControlPlaneStore, initializeAdminControlPlaneStore } from './modules/admin/controlPlane.js';
+import {
+  adminControlPlaneStore,
+  initializeAdminControlPlaneStore,
+  subscribeAdminControlPlane,
+} from './modules/admin/controlPlane.js';
 import { createJsonStore } from './modules/storage/jsonStore.js';
 import {
   createPostgresCanvasUserRepository,
@@ -4072,6 +4077,28 @@ async function acquireGlobalImageConcurrency() {
   };
 }
 
+function dynamicOverloadSnapshot() {
+  return dynamicOverloadGuard.getSnapshot(adminControlPlaneStore.get().publicApi);
+}
+
+function isDynamicOverloadProtectionActive() {
+  return dynamicOverloadGuard.shouldReject(adminControlPlaneStore.get().publicApi);
+}
+
+function dynamicOverloadError() {
+  const snapshot = dynamicOverloadSnapshot();
+  return imageEndpointError({
+    code: 'server_overloaded',
+    message: 'The image API is temporarily overloaded. Please retry shortly.',
+    statusCode: 429,
+    failureCategory: 'retryable_overloaded',
+    details: {
+      reasons: snapshot.reasons,
+      retry_after_seconds: 5,
+    },
+  });
+}
+
 async function buildCanvasUserSessionPayload(input: {
   user: CanvasUserRecord;
   rawApiKey?: string;
@@ -6539,6 +6566,9 @@ async function processAsyncImageQueue() {
   }
   asyncQueuePumpRunning = true;
   try {
+    if (isDynamicOverloadProtectionActive()) {
+      return;
+    }
     const queuedTasks = (await listQueuedImageTasks())
       .sort((left, right) => left.created_at - right.created_at);
 
@@ -6967,6 +6997,11 @@ app.post('/v1/images/generations', async (request, reply) => {
       },
     });
   }
+  if (isDynamicOverloadProtectionActive()) {
+    reply.header('Retry-After', '5');
+    reply.code(429);
+    return dynamicOverloadError();
+  }
   if (payload.async) {
     const queueState = await inspectAsyncQueueState(accessContext);
     if (queueState.totalQueuedCount >= asyncImageQueueMax) {
@@ -7200,6 +7235,11 @@ app.post('/v1/images/edits', async (request, reply) => {
         limit_per_minute: rateLimit.limit,
       },
     });
+  }
+  if (isDynamicOverloadProtectionActive()) {
+    reply.header('Retry-After', '5');
+    reply.code(429);
+    return dynamicOverloadError();
   }
   if (payload.async) {
     const queueState = await inspectAsyncQueueState(accessContext);
@@ -8775,6 +8815,8 @@ function normalizeOperationalCostQuality(value: unknown): 'auto' | 'low' | 'medi
 await initializeProviderRegistry();
 await initializeAdminConsoleCatalogStore();
 await initializeAdminControlPlaneStore();
+dynamicOverloadGuard.configure(adminControlPlaneStore.get().publicApi);
+subscribeAdminControlPlane((config) => dynamicOverloadGuard.configure(config.publicApi));
 await initializeCanvasUserStores();
 await registerAdminRoutes(app);
 registerUnifiedErrorHandler();

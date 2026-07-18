@@ -98,6 +98,10 @@ const controlPlaneSchema = z.object({
     maxConcurrency: z.number().int().nonnegative(),
     exposeGenerations: z.boolean(),
     exposeEdits: z.boolean(),
+    overloadGuardEnabled: z.boolean(),
+    overloadGuardMinAvailableMemoryRatio: z.number().min(0.03).max(0.8),
+    overloadGuardMaxCpuLoadRatio: z.number().min(0.1).max(2),
+    overloadGuardMaxEventLoopDelayMs: z.number().int().min(25).max(10_000),
   }),
   canvas: z.object({
     allowUserSuppliedProviders: z.boolean(),
