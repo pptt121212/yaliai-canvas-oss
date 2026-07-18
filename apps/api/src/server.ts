@@ -2196,22 +2196,34 @@ function supportedJsonReferenceTransports(provider: {
   return ['url', 'base64'] as const;
 }
 
+function withDefaultUpstreamImageOutputFormat(payload: z.infer<typeof openAIImagesSchema>) {
+  const requestedFormat = String(payload.output_format ?? payload.extra_body?.output_format ?? '').trim();
+  if (requestedFormat) {
+    return payload;
+  }
+  return {
+    ...payload,
+    output_format: 'jpeg',
+  };
+}
+
 async function adaptPayloadForProvider(input: {
   request: any;
   payload: z.infer<typeof openAIImagesSchema>;
   provider: { protocol?: string; metadata?: Record<string, unknown>; capability?: Record<string, unknown> };
 }) {
+  const payload = withDefaultUpstreamImageOutputFormat(input.payload);
   const transports = supportedJsonReferenceTransports(input.provider);
   if (!transports.includes('url') && !transports.includes('base64')) {
-    return input.payload;
+    return payload;
   }
   if (transports.includes('url') && !transports.includes('base64')) {
-    return normalizeIncomingImagePayloadReferences(input.request, input.payload);
+    return normalizeIncomingImagePayloadReferences(input.request, payload);
   }
   if (transports.includes('base64') && !transports.includes('url')) {
-    return normalizeIncomingImagePayloadReferencesToDataUrl(input.payload);
+    return normalizeIncomingImagePayloadReferencesToDataUrl(payload);
   }
-  return normalizeIncomingImagePayloadReferencesPreservingUrls(input.payload);
+  return normalizeIncomingImagePayloadReferencesPreservingUrls(payload);
 }
 
 async function fetchImageUrlAsBase64(url: string) {
@@ -6650,7 +6662,7 @@ async function replyWithProxyResult(
         bodyJson: result.response.bodyJson,
         bodyText: result.response.bodyText,
         responseFormat: resolveDownstreamImageResponseFormat(submittedPayload),
-        outputFormat: String(submittedPayload.extra_body?.output_format || 'png'),
+        outputFormat: String(submittedPayload.output_format || submittedPayload.extra_body?.output_format || 'png'),
         requestedImageCount: submittedPayload.n,
         requestedSize: submittedPayload.size,
         requestedQuality: submittedPayload.quality,
@@ -6666,7 +6678,7 @@ async function replyWithProxyResult(
           bodyJson: result.response.bodyJson,
           bodyText: result.response.bodyText,
           responseFormat: resolveDownstreamImageResponseFormat(submittedPayload),
-          outputFormat: String(submittedPayload.extra_body?.output_format || 'png'),
+          outputFormat: String(submittedPayload.output_format || submittedPayload.extra_body?.output_format || 'png'),
           requestedImageCount: submittedPayload.n,
           requestedSize: submittedPayload.size,
           requestedQuality: submittedPayload.quality,
