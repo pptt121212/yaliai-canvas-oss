@@ -15,6 +15,12 @@ import {
 import { operationalRepository } from './modules/storage/operationalStore.js';
 import type { ResolutionAuditSummaryRow } from './modules/imageResolutionAudit.js';
 import { buildResolutionAuditReport, type ResolutionAuditReport } from './modules/imageResolutionAudit.js';
+import {
+  hasEnabledImageCapabilityTier,
+  resolveImageCapabilityCost,
+  supportsImageCapabilityCombination,
+  type ImageCapabilityProfileLike,
+} from './modules/imageCapabilityMatrix.js';
 
 export type ImageRoutingMode = 'smart_priority' | 'smart_failover' | 'fixed_provider';
 
@@ -175,22 +181,7 @@ function providerCapabilityProfiles(provider: ProviderConfig) {
   const profiles = kind === 'responses_endpoint'
     ? provider.metadata?.responses_capability_profiles
     : provider.metadata?.images_capability_profiles;
-  return Array.isArray(profiles) ? profiles : [];
-}
-
-function providerResolutionTiers(provider: ProviderConfig) {
-  const profiles = providerCapabilityProfiles(provider);
-  if (!Array.isArray(profiles)) {
-    return ['auto', '1k', '2k', '4k'];
-  }
-  const tiers = profiles.flatMap((item) => {
-    if (!item || typeof item !== 'object') {
-      return [];
-    }
-    const tier = String((item as Record<string, unknown>).tier || '');
-    return tier === 'auto' || tier === '1k' || tier === '2k' || tier === '4k' ? [tier] : [];
-  });
-  return tiers.length ? Array.from(new Set(tiers)) : ['auto', '1k', '2k', '4k'];
+  return Array.isArray(profiles) ? profiles as ImageCapabilityProfileLike[] : undefined;
 }
 
 function providerSupportsTierQuality(
@@ -198,30 +189,7 @@ function providerSupportsTierQuality(
   requestedTier: 'auto' | '1k' | '2k' | '4k',
   quality: 'auto' | 'low' | 'medium' | 'high',
 ) {
-  const profiles = providerCapabilityProfiles(provider);
-  if (!profiles.length) {
-    return true;
-  }
-  const matched = profiles.find((item) => {
-    if (!item || typeof item !== 'object') {
-      return false;
-    }
-    return String((item as Record<string, unknown>).tier || '') === requestedTier;
-  });
-  if (!matched || typeof matched !== 'object') {
-    return false;
-  }
-  const qualities = Array.isArray((matched as Record<string, unknown>).qualities)
-    ? ((matched as Record<string, unknown>).qualities as unknown[])
-      .map((item) => String(item || '').trim().toLowerCase())
-      .filter((item): item is 'auto' | 'low' | 'medium' | 'high' => (
-        item === 'auto' || item === 'low' || item === 'medium' || item === 'high'
-      ))
-    : [];
-  if (!qualities.length) {
-    return false;
-  }
-  return qualities.includes(quality);
+  return supportsImageCapabilityCombination(providerCapabilityProfiles(provider), requestedTier, quality);
 }
 
 function providerCapabilityCost(
@@ -229,76 +197,8 @@ function providerCapabilityCost(
   requestedTier: 'auto' | '1k' | '2k' | '4k',
   quality: 'auto' | 'low' | 'medium' | 'high',
 ) {
-  const profiles = providerCapabilityProfiles(provider);
-  const matched = profiles.find((item) => {
-    if (!item || typeof item !== 'object') {
-      return false;
-    }
-    return String((item as Record<string, unknown>).tier || '') === requestedTier;
-  });
-  const readCost = (profile: unknown) => {
-    if (!profile || typeof profile !== 'object') {
-      return null;
-    }
-    const record = profile as Record<string, unknown>;
-    const qualities = Array.isArray(record.qualities) ? record.qualities : [];
-    if (!qualities.includes(quality)) {
-      return null;
-    }
-    const costs = record.costs;
-    if (!costs || typeof costs !== 'object') {
-      return null;
-    }
-    if ((costs as Record<string, unknown>)[quality] === undefined) {
-      return null;
-    }
-    const value = Number((costs as Record<string, unknown>)[quality]);
-    return Number.isFinite(value) ? Math.max(0, value) : null;
-  };
-
-  const exactCost = readCost(matched);
-  if (exactCost !== null) {
-    return { value: exactCost, source: 'exact' as const };
-  }
-
-  const tierRank: Record<string, number> = { auto: 0, '1k': 1, '2k': 2, '4k': 3 };
-  const qualityRank: Record<string, number> = { auto: 0, low: 1, medium: 2, high: 3 };
-  let highest: { value: number; tierRank: number; qualityRank: number } | null = null;
-  for (const profile of profiles) {
-    if (!profile || typeof profile !== 'object') {
-      continue;
-    }
-    const record = profile as Record<string, unknown>;
-    const profileTierRank = tierRank[String(record.tier || '')];
-    const qualities = Array.isArray(record.qualities) ? record.qualities : [];
-    const costs = record.costs && typeof record.costs === 'object'
-      ? record.costs as Record<string, unknown>
-      : {};
-    for (const configuredQuality of ['auto', 'low', 'medium', 'high']) {
-      if (!qualities.includes(configuredQuality) || costs[configuredQuality] === undefined) {
-        continue;
-      }
-      const value = Number(costs[configuredQuality]);
-      if (!Number.isFinite(value)) {
-        continue;
-      }
-      const next = {
-        value: Math.max(0, value),
-        tierRank: Number(profileTierRank || 0),
-        qualityRank: qualityRank[configuredQuality],
-      };
-      if (!highest
-        || next.tierRank > highest.tierRank
-        || (next.tierRank === highest.tierRank && next.qualityRank > highest.qualityRank)) {
-        highest = next;
-      }
-    }
-  }
-  if (highest) {
-    return { value: highest.value, source: 'highest_configured_fallback' as const };
-  }
-
-  return { value: 0, source: 'unconfigured' as const };
+  const resolved = resolveImageCapabilityCost(providerCapabilityProfiles(provider), requestedTier, quality);
+  return { value: resolved.value, source: resolved.source };
 }
 
 function providerResponseFormatCompatibilityReason(
@@ -404,8 +304,7 @@ function filterProviderForRequest(provider: ProviderConfig, context: ImageRoutin
   }
   const requestedTier = requestTier(context.requestedSize);
   if (!context.ignoreTierQualityCapability) {
-    const supportedTiers = providerResolutionTiers(provider);
-    if (requestedTier !== 'auto' && !supportedTiers.includes(requestedTier)) {
+    if (requestedTier !== 'auto' && !hasEnabledImageCapabilityTier(providerCapabilityProfiles(provider), requestedTier)) {
       return {
         reason: `tier_${requestedTier}_not_supported`,
         temporaryRuntimeBlock: false,

@@ -13,6 +13,7 @@ import { yuanToMinorUnits } from '@yali/billing-core';
 import { adaptOpenAIImagesPayloadForProvider, buildImageRequestPlanForProvider } from './imageGateway.js';
 import { providerRegistry } from './providerRegistry.js';
 import { buildSmartImageRoutingPlan, classifyUpstreamFailure } from './smartImageRouting.js';
+import { resolveImageCapabilityCost } from './modules/imageCapabilityMatrix.js';
 import {
   adminControlPlaneStore,
   providerAdapterCatalog,
@@ -22,7 +23,6 @@ import {
   adminConsoleCatalogStore,
   analyzeOnboardingInput,
   createMaskedApiKey,
-  type ImageCapabilityProfile,
   type OnboardingProbeLogEntry,
   type ProbeTraceEntry,
   type ConsoleUpstream,
@@ -1261,58 +1261,6 @@ function normalizeCostQuality(value: unknown): 'auto' | 'low' | 'medium' | 'high
   return 'auto';
 }
 
-const imageCostTierRank: Record<'auto' | '1k' | '2k' | '4k', number> = {
-  auto: 0,
-  '1k': 1,
-  '2k': 2,
-  '4k': 3,
-};
-
-const imageCostQualityRank: Record<'auto' | 'low' | 'medium' | 'high', number> = {
-  auto: 0,
-  low: 1,
-  medium: 2,
-  high: 3,
-};
-
-function resolveHighestConfiguredImageCost(
-  profiles: ImageCapabilityProfile[] | undefined,
-) {
-  let best: {
-    tier: 'auto' | '1k' | '2k' | '4k';
-    quality: 'auto' | 'low' | 'medium' | 'high';
-    value: number;
-  } | null = null;
-
-  for (const profile of profiles || []) {
-    const tier = profile.tier;
-    const enabledQualities = new Set(profile.qualities || []);
-    for (const quality of ['auto', 'low', 'medium', 'high'] as const) {
-      if (!enabledQualities.has(quality) || profile.costs?.[quality] === undefined) {
-        continue;
-      }
-      const value = Number(profile.costs[quality] || 0);
-      if (!Number.isFinite(value)) {
-        continue;
-      }
-      if (!best
-        || imageCostTierRank[tier] > imageCostTierRank[best.tier]
-        || (
-          imageCostTierRank[tier] === imageCostTierRank[best.tier]
-          && imageCostQualityRank[quality] > imageCostQualityRank[best.quality]
-        )) {
-        best = {
-          tier,
-          quality,
-          value: Math.max(0, value),
-        };
-      }
-    }
-  }
-
-  return best;
-}
-
 function resolveConfiguredImageCost(
   upstream: ConsoleUpstream | undefined,
   tier: 'auto' | '1k' | '2k' | '4k' | null,
@@ -1326,27 +1274,8 @@ function resolveConfiguredImageCost(
     : upstream.kind === 'responses_endpoint'
       ? upstream.responsesConfig?.capabilityProfiles
       : [];
-  const profile = profiles?.find((item) => item.tier === tier);
-  if (profile?.qualities?.includes(quality) && profile.costs && profile.costs[quality] !== undefined) {
-    const value = Number(profile.costs[quality] || 0);
-    return {
-      configured: Number.isFinite(value),
-      value: Number.isFinite(value) ? Math.max(0, value) : 0,
-    };
-  }
-
-  const fallback = resolveHighestConfiguredImageCost(profiles);
-  if (fallback) {
-    return {
-      configured: true,
-      value: fallback.value,
-    };
-  }
-
-  return {
-    configured: false,
-    value: 0,
-  };
+  const resolved = resolveImageCapabilityCost(profiles, tier, quality);
+  return { configured: resolved.configured, value: resolved.value };
 }
 
 function imageCostYuanToReportCredits(value: number) {

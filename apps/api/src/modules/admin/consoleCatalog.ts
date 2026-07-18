@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { FastifyRequest } from 'fastify';
 import { providerRegistry } from '../../providerRegistry.js';
+import { hasEnabledImageCapabilityTier } from '../imageCapabilityMatrix.js';
 import { createJsonStore } from '../storage/jsonStore.js';
 import { startPostgresConfigListener } from '../storage/postgresConfigEvents.js';
 import { createPostgresConsoleCatalogRepository } from '../storage/postgresRepositories.js';
@@ -567,7 +568,10 @@ function normalizeImageCapabilityCosts(input: unknown): ImageCapabilityCostMap {
 }
 
 function normalizeImageCapabilityProfiles(input?: unknown): ImageCapabilityProfile[] {
-  const source = Array.isArray(input) ? input : [];
+  if (!Array.isArray(input)) {
+    return defaultImageCapabilityProfiles();
+  }
+  const source = input;
   const tiers: ResolutionTier[] = ['auto', '1k', '2k', '4k'];
   const byTier = new Map<ResolutionTier, ImageCapabilityProfile>();
   for (const item of source) {
@@ -588,7 +592,7 @@ function normalizeImageCapabilityProfiles(input?: unknown): ImageCapabilityProfi
   }
 
   if (!byTier.size) {
-    return defaultImageCapabilityProfiles();
+    return [];
   }
 
   return tiers
@@ -1012,6 +1016,7 @@ function deriveImagesRuntimeFields(input: {
 
 function normalizeImagesConfig(input?: Partial<ImagesEndpointConfig> | null): ImagesEndpointConfig {
   const defaults = defaultImagesConfig();
+  const hasCapabilityProfiles = Boolean(input && Object.prototype.hasOwnProperty.call(input, 'capabilityProfiles'));
   const responseFormats: ResponseFormat[] = Array.isArray(input?.responseFormats)
     ? input.responseFormats
     : defaults.responseFormats;
@@ -1033,7 +1038,11 @@ function normalizeImagesConfig(input?: Partial<ImagesEndpointConfig> | null): Im
     jsonReferenceTransports,
     responseFormats,
     allowDirectPublicImageUrl: Boolean(input?.allowDirectPublicImageUrl) && responseFormats.includes('url'),
-    capabilityProfiles: normalizeImageCapabilityProfiles(input?.capabilityProfiles),
+    capabilityProfiles: hasCapabilityProfiles
+      ? (Array.isArray(input?.capabilityProfiles) && input.capabilityProfiles.length === 0
+        ? []
+        : normalizeImageCapabilityProfiles(input?.capabilityProfiles))
+      : defaults.capabilityProfiles,
     generationsUrl: normalizeOptionalEndpointUrl(input?.generationsUrl),
     editsUrl: normalizeOptionalEndpointUrl(input?.editsUrl),
     asyncGenerationsUrl: normalizeOptionalEndpointUrl(input?.asyncGenerationsUrl),
@@ -1235,13 +1244,19 @@ function supportedResolutionTiersForUpstream(upstream?: ConsoleUpstream): Resolu
     return ['auto'];
   }
   if (upstream.kind === 'images_endpoint') {
-    return upstream.imagesConfig?.capabilityProfiles?.length
-      ? upstream.imagesConfig.capabilityProfiles.map((item) => item.tier)
+    const profiles = upstream.imagesConfig?.capabilityProfiles;
+    return Array.isArray(profiles)
+      ? profiles
+        .filter((item) => hasEnabledImageCapabilityTier(profiles, item.tier))
+        .map((item) => item.tier)
       : ['auto'];
   }
   if (upstream.kind === 'responses_endpoint') {
-    return upstream.responsesConfig?.capabilityProfiles?.length
-      ? upstream.responsesConfig.capabilityProfiles.map((item) => item.tier)
+    const profiles = upstream.responsesConfig?.capabilityProfiles;
+    return Array.isArray(profiles)
+      ? profiles
+        .filter((item) => hasEnabledImageCapabilityTier(profiles, item.tier))
+        .map((item) => item.tier)
       : ['auto', '1k', '2k', '4k'];
   }
   return [];

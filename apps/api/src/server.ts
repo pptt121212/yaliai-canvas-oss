@@ -27,7 +27,6 @@ import {
   initializeAdminConsoleCatalogStore,
   type ConsoleApiKey,
   type ConsoleUpstream,
-  type ImageCapabilityProfile,
 } from './modules/admin/consoleCatalog.js';
 import {
   buildBillingAuditImageRecords,
@@ -35,6 +34,7 @@ import {
   buildImageResolutionAuditRecords,
   type BillingAuditImageRecord,
 } from './modules/imageResolutionAudit.js';
+import { resolveImageCapabilityCost } from './modules/imageCapabilityMatrix.js';
 import { startOperationalRollupScheduler } from './modules/operationalRollups.js';
 import {
   appendAuditRecord,
@@ -8724,69 +8724,6 @@ app.post('/v1/canvas/workflow-runs/cancel', async (request) => {
   return { success: true, run_id: body.run_id, status: record.status };
 });
 
-const operationalCostTierRank: Record<'auto' | '1k' | '2k' | '4k', number> = {
-  auto: 0,
-  '1k': 1,
-  '2k': 2,
-  '4k': 3,
-};
-
-const operationalCostQualityRank: Record<'auto' | 'low' | 'medium' | 'high', number> = {
-  auto: 0,
-  low: 1,
-  medium: 2,
-  high: 3,
-};
-
-function normalizeOperationalCostTier(value: unknown): 'auto' | '1k' | '2k' | '4k' | null {
-  const normalized = String(value || '').trim().toLowerCase();
-  if (normalized === 'auto' || normalized === '1k' || normalized === '2k' || normalized === '4k') {
-    return normalized;
-  }
-  return null;
-}
-
-function normalizeOperationalCostQuality(value: unknown): 'auto' | 'low' | 'medium' | 'high' {
-  const normalized = String(value || '').trim().toLowerCase();
-  if (normalized === 'low' || normalized === 'medium' || normalized === 'high' || normalized === 'auto') {
-    return normalized;
-  }
-  return 'auto';
-}
-
-function resolveHighestOperationalImageCost(profiles: ImageCapabilityProfile[] | undefined) {
-  let best: {
-    tier: 'auto' | '1k' | '2k' | '4k';
-    quality: 'auto' | 'low' | 'medium' | 'high';
-    value: number;
-  } | null = null;
-  for (const profile of profiles || []) {
-    const enabledQualities = new Set(profile.qualities || []);
-    for (const quality of ['auto', 'low', 'medium', 'high'] as const) {
-      if (!enabledQualities.has(quality) || profile.costs?.[quality] === undefined) {
-        continue;
-      }
-      const value = Number(profile.costs[quality] || 0);
-      if (!Number.isFinite(value)) {
-        continue;
-      }
-      if (!best
-        || operationalCostTierRank[profile.tier] > operationalCostTierRank[best.tier]
-        || (
-          operationalCostTierRank[profile.tier] === operationalCostTierRank[best.tier]
-          && operationalCostQualityRank[quality] > operationalCostQualityRank[best.quality]
-        )) {
-        best = {
-          tier: profile.tier,
-          quality,
-          value: Math.max(0, value),
-        };
-      }
-    }
-  }
-  return best;
-}
-
 function resolveOperationalImageCost(
   upstream: ConsoleUpstream | undefined,
   tier: 'auto' | '1k' | '2k' | '4k' | null,
@@ -8800,22 +8737,25 @@ function resolveOperationalImageCost(
     : upstream.kind === 'responses_endpoint'
       ? upstream.responsesConfig?.capabilityProfiles
       : [];
-  const profile = profiles?.find((item) => item.tier === tier);
-  if (profile?.qualities?.includes(quality) && profile.costs && profile.costs[quality] !== undefined) {
-    const value = Number(profile.costs[quality] || 0);
-    return {
-      configured: Number.isFinite(value),
-      valueCredits: Number.isFinite(value) ? Math.max(0, yuanToMinorUnits(value)) : 0,
-    };
-  }
-  const fallback = resolveHighestOperationalImageCost(profiles);
-  if (fallback) {
-    return {
-      configured: true,
-      valueCredits: Math.max(0, yuanToMinorUnits(fallback.value)),
-    };
-  }
-  return { configured: false, valueCredits: 0 };
+  const resolved = resolveImageCapabilityCost(profiles, tier, quality);
+  return {
+    configured: resolved.configured,
+    valueCredits: resolved.configured ? Math.max(0, yuanToMinorUnits(resolved.value)) : 0,
+  };
+}
+
+function normalizeOperationalCostTier(value: unknown): 'auto' | '1k' | '2k' | '4k' | null {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === 'auto' || normalized === '1k' || normalized === '2k' || normalized === '4k'
+    ? normalized
+    : null;
+}
+
+function normalizeOperationalCostQuality(value: unknown): 'auto' | 'low' | 'medium' | 'high' {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === 'low' || normalized === 'medium' || normalized === 'high' || normalized === 'auto'
+    ? normalized
+    : 'auto';
 }
 
 await initializeProviderRegistry();
