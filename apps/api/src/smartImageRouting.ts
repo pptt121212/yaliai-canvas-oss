@@ -219,7 +219,7 @@ function providerSupportsTierQuality(
       ))
     : [];
   if (!qualities.length) {
-    return quality === 'auto';
+    return false;
   }
   return qualities.includes(quality);
 }
