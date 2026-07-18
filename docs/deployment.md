@@ -173,6 +173,8 @@ Important runtime tuning variables:
 | Variable | Default | Purpose |
 | --- | ---: | --- |
 | `PM2_API_INSTANCES` | `2` | Number of clustered API processes. |
+| `PM2_API_KILL_TIMEOUT_MS` | `660000` | Maximum time PM2 waits for an in-flight API request during reload. |
+| `GRACEFUL_SHUTDOWN_TIMEOUT_MS` | `660000` | API process drain timeout after `SIGINT` or `SIGTERM`; keep it at least as large as the longest upstream request timeout. |
 | `PG_POOL_MAX` | `12` | PostgreSQL pool size per process. |
 | `API_REQUEST_BODY_LIMIT_BYTES` | `134217728` | Downstream request body limit. Match Nginx `client_max_body_size`. |
 | `IMAGE_PAYLOAD_MAX_BYTES` | `12582912` | Absolute hard cap for one input image. It cannot exceed 12MiB. |
@@ -355,7 +357,7 @@ pnpm install --frozen-lockfile
 pnpm check
 pnpm -r build
 DATABASE_URL="$DATABASE_URL" PG_SCHEMA="$PG_SCHEMA" pnpm --filter @yali/api bootstrap:postgres
-pm2 reload yali-canvas-api --update-env
+pm2 startOrReload deploy/api/ecosystem.config.cjs --only yali-canvas-api --update-env
 pm2 restart yali-canvas-worker --update-env
 sudo nginx -t
 sudo systemctl reload nginx

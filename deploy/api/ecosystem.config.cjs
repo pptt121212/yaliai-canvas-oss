@@ -7,6 +7,9 @@ module.exports = {
       interpreter: 'node',
       exec_mode: 'cluster',
       instances: Number(process.env.PM2_API_INSTANCES || 2),
+      wait_ready: true,
+      listen_timeout: 30_000,
+      kill_timeout: Number(process.env.PM2_API_KILL_TIMEOUT_MS || 11 * 60_000),
       env: {
         NODE_ENV: process.env.NODE_ENV || 'production',
         PORT: process.env.PORT || 4010,
@@ -23,6 +26,7 @@ module.exports = {
         DEFAULT_TEST_REFERENCE_IMAGE_URL: process.env.DEFAULT_TEST_REFERENCE_IMAGE_URL,
         GENERATED_IMAGE_ACCEL_REDIRECT_PREFIX: process.env.GENERATED_IMAGE_ACCEL_REDIRECT_PREFIX || '/_generated-images',
         GENERATED_IMAGE_ACCEL_REDIRECT_TARGET_DIR: process.env.GENERATED_IMAGE_ACCEL_REDIRECT_TARGET_DIR,
+        GRACEFUL_SHUTDOWN_TIMEOUT_MS: process.env.GRACEFUL_SHUTDOWN_TIMEOUT_MS || 11 * 60_000,
       },
     },
     {

@@ -106,6 +106,7 @@ requireDatabaseUrl('api_server');
 requireSharedHotState('api_server');
 const port = Number(process.env.PORT || 4010);
 const host = process.env.HOST || '0.0.0.0';
+const gracefulShutdownTimeoutMs = Math.max(30_000, Number(process.env.GRACEFUL_SHUTDOWN_TIMEOUT_MS || 11 * 60_000));
 const imageTaskTtlSeconds = 60 * 15;
 const asyncImageQueueMax = Math.max(1, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_MAX || 200)));
 const asyncImageQueuePerApiKeyMax = Math.max(1, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_PER_API_KEY_MAX || 20)));
@@ -8947,7 +8948,41 @@ startOperationalRollupScheduler({
   },
 });
 
-app.listen({ port, host }).catch((error) => {
+let gracefulShutdownStarted = false;
+
+async function closeApiServer(signal: NodeJS.Signals) {
+  if (gracefulShutdownStarted) {
+    return;
+  }
+  gracefulShutdownStarted = true;
+  app.log.info({ signal, gracefulShutdownTimeoutMs }, 'api_server_graceful_shutdown_started');
+  const forceExitTimer = setTimeout(() => {
+    app.log.error({ signal, gracefulShutdownTimeoutMs }, 'api_server_graceful_shutdown_timed_out');
+    process.exit(1);
+  }, gracefulShutdownTimeoutMs);
+  forceExitTimer.unref();
+  try {
+    await app.close();
+    app.log.info({ signal }, 'api_server_graceful_shutdown_completed');
+    process.exit(0);
+  } catch (error) {
+    app.log.error(error, 'api_server_graceful_shutdown_failed');
+    process.exit(1);
+  }
+}
+
+process.once('SIGINT', () => {
+  void closeApiServer('SIGINT');
+});
+process.once('SIGTERM', () => {
+  void closeApiServer('SIGTERM');
+});
+
+app.listen({ port, host }).then(() => {
+  if (typeof process.send === 'function') {
+    process.send('ready');
+  }
+}).catch((error) => {
   app.log.error(error);
   process.exit(1);
 });
