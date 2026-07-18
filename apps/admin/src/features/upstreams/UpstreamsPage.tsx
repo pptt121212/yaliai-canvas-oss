@@ -164,6 +164,53 @@ function healthTone(value: ConsoleUpstream['healthStatus']): StatusTone {
   return 'neutral';
 }
 
+function displayUpstreamHost(value: string) {
+  try {
+    return new URL(value).hostname;
+  } catch {
+    return String(value || '')
+      .replace(/^https?:\/\//i, '')
+      .split('/')[0]
+      .split(':')[0];
+  }
+}
+
+function imageUploadFormats(upstream: ConsoleUpstream) {
+  if (upstream.kind === 'images_endpoint') {
+    if (!upstream.imagesConfig?.supportsEdits) {
+      return '不支持';
+    }
+    const transports = upstream.imagesConfig.jsonReferenceTransports || [];
+    const formats = [
+      ...(transports.includes('url') ? ['URL'] : []),
+      ...(transports.includes('base64') ? ['BASE64'] : []),
+    ];
+    return formats.length ? formats.join(' / ') : '未配置';
+  }
+  if (upstream.kind !== 'responses_endpoint' || !upstream.responsesConfig?.supportsImageInput) {
+    return '不支持';
+  }
+  const transports = upstream.responsesConfig.jsonReferenceTransports || [];
+  const formats = [
+    ...(transports.includes('url') ? ['URL'] : []),
+    ...(transports.includes('base64') ? ['BASE64'] : []),
+  ];
+  return formats.length ? formats.join(' / ') : '未配置';
+}
+
+function imageReturnFormats(upstream: ConsoleUpstream) {
+  const formats = upstream.kind === 'images_endpoint'
+    ? upstream.imagesConfig?.responseFormats || []
+    : upstream.kind === 'responses_endpoint'
+      ? upstream.responsesConfig?.responseFormats || []
+      : [];
+  const labels = [
+    ...(formats.includes('url') ? ['URL'] : []),
+    ...(formats.includes('b64_json') ? ['BASE64'] : []),
+  ];
+  return labels.length ? labels.join(' / ') : '未配置';
+}
+
 const imageReturnModeOptions = [
   { value: 'json', label: '上游标准 JSON（不向上游发送 stream=true）' },
   { value: 'stream', label: '上游原生 SSE（仅上游明确支持 stream=true 时选择）' },
@@ -1473,7 +1520,22 @@ export function UpstreamsPage({ catalog, saving, onSave, onDelete, onTest }: Ups
           columns={[
             { title: '名称', dataIndex: 'name' },
             { title: '协议类型', width: 180, render: (_, record) => kindOptions.find((item) => item.value === record.kind)?.label || record.kind },
-            { title: '地址', dataIndex: 'baseUrl', render: (value?: string) => <EllipsisText value={value} /> },
+            {
+              title: '地址',
+              dataIndex: 'baseUrl',
+              width: 170,
+              render: (value?: string) => <Text>{displayUpstreamHost(value || '')}</Text>,
+            },
+            {
+              title: '图片上报',
+              width: 130,
+              render: (_, record) => <Text>{imageUploadFormats(record)}</Text>,
+            },
+            {
+              title: '图片返回',
+              width: 130,
+              render: (_, record) => <Text>{imageReturnFormats(record)}</Text>,
+            },
             {
               title: '状态',
               width: 120,
