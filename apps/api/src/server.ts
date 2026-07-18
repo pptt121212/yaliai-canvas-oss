@@ -5391,6 +5391,13 @@ async function buildActualImageBilling(input: {
   const billingMode = fixedUnitCents > 0 ? 'fixed_provider_flat_price' : 'global_image_price_matrix';
   const billingModeLabel = fixedUnitCents > 0 ? '固定线路一口价' : '按请求尺寸档位';
   const actualQuality = readActualImageQualityFromResponsePayload(input.responsePayload);
+  const upstreamCostTier = requestedTier || (requestedSize === 'auto' ? 'auto' : null);
+  const upstreamCostQuality = normalizeRequestedImageQuality(submittedQuality);
+  const catalog = adminConsoleCatalogStore.get();
+  const upstream = catalog.upstreams.find((item) => item.id === input.upstreamId);
+  // Cost is based on the request actually sent upstream, not a downstream raw
+  // parameter or a later response downgrade.
+  const upstreamCost = resolveOperationalImageCost(upstream, upstreamCostTier, upstreamCostQuality);
   const billedQuality = resolveBilledImageQuality({
     submittedQuality,
     actualQuality,
@@ -5457,6 +5464,12 @@ async function buildActualImageBilling(input: {
         billingModeLabel,
         billedPricingMode: billingMode,
         fixedImageFlatPriceMinorUnits: fixedUnitCents > 0 ? fixedUnitCents : null,
+        upstreamCostConfigured: upstreamCost.configured,
+        upstreamCostMinorUnits: upstreamCost.configured ? upstreamCost.valueCredits : undefined,
+        upstreamCostYuan: upstreamCost.configured ? minorUnitsToYuan(upstreamCost.valueCredits) : null,
+        upstreamCostSource: upstreamCost.source,
+        upstreamCostTier,
+        upstreamCostQuality,
         imageUrl: record.imageUrl || null,
         extractionSource: record.extractionSource,
       },
@@ -8730,7 +8743,7 @@ function resolveOperationalImageCost(
   quality: 'auto' | 'low' | 'medium' | 'high',
 ) {
   if (!upstream || !tier) {
-    return { configured: false, valueCredits: 0 };
+    return { configured: false, valueCredits: 0, source: 'unconfigured' as const };
   }
   const profiles = upstream.kind === 'images_endpoint'
     ? upstream.imagesConfig?.capabilityProfiles
@@ -8741,6 +8754,7 @@ function resolveOperationalImageCost(
   return {
     configured: resolved.configured,
     valueCredits: resolved.configured ? Math.max(0, yuanToMinorUnits(resolved.value)) : 0,
+    source: resolved.source,
   };
 }
 

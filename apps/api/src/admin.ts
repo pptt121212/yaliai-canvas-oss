@@ -1374,11 +1374,17 @@ async function buildChannelPerformanceReport(days: number) {
     let estimatedUpstreamCostCredits = 0;
     let costedImageCount = 0;
     for (const row of billingRows) {
-      const tier = normalizeCostTier(row.tier);
-      const quality = normalizeCostQuality(row.quality);
-      const resolved = resolveConfiguredImageCost(upstreamById.get(upstreamId), tier, quality);
+      const persistedCostCredits = Math.max(0, Number(row.upstreamUnitCostCredits || 0));
+      const resolved = row.upstreamUnitCostConfigured
+        ? { configured: true, valueCredits: persistedCostCredits }
+        : (() => {
+            const tier = normalizeCostTier(row.tier);
+            const quality = normalizeCostQuality(row.quality);
+            const fallback = resolveConfiguredImageCost(upstreamById.get(upstreamId), tier, quality);
+            return { configured: fallback.configured, valueCredits: imageCostYuanToReportCredits(fallback.value) };
+          })();
       if (resolved.configured) {
-        estimatedUpstreamCostCredits += imageCostYuanToReportCredits(resolved.value) * row.unitCount;
+        estimatedUpstreamCostCredits += resolved.valueCredits * row.unitCount;
         costedImageCount += row.unitCount;
       }
     }
@@ -1488,11 +1494,17 @@ async function buildChannelPerformanceReport(days: number) {
 
   const imageTasksSummary = summarizeTaskRows(imageTaskRows);
   const imageSummaryBilling = imageBillingRows.reduce((result, row) => {
-    const tier = normalizeCostTier(row.tier);
-    const quality = normalizeCostQuality(row.quality);
-    const resolved = resolveConfiguredImageCost(upstreamById.get(row.upstreamId || ''), tier, quality);
+    const persistedCostCredits = Math.max(0, Number(row.upstreamUnitCostCredits || 0));
+    const resolved = row.upstreamUnitCostConfigured
+      ? { configured: true, valueCredits: persistedCostCredits }
+      : (() => {
+          const tier = normalizeCostTier(row.tier);
+          const quality = normalizeCostQuality(row.quality);
+          const fallback = resolveConfiguredImageCost(upstreamById.get(row.upstreamId || ''), tier, quality);
+          return { configured: fallback.configured, valueCredits: imageCostYuanToReportCredits(fallback.value) };
+        })();
     if (resolved.configured) {
-      result.estimatedUpstreamCostCredits += imageCostYuanToReportCredits(resolved.value) * row.unitCount;
+      result.estimatedUpstreamCostCredits += resolved.valueCredits * row.unitCount;
       result.costedImageCount += row.unitCount;
     }
     result.generatedImageCount += row.unitCount;
@@ -1916,6 +1928,19 @@ export async function registerAdminRoutes(app: FastifyInstance) {
             : includeImageDetails && typeof row.detail?.billedTier === 'string'
               ? row.detail.billedTier
               : undefined,
+        upstreamCostConfigured: includeImageDetails && row.detail?.upstreamCostConfigured === true,
+        upstreamCostMinorUnits: includeImageDetails && Number.isFinite(Number(row.detail?.upstreamCostMinorUnits))
+          ? Number(row.detail?.upstreamCostMinorUnits)
+          : undefined,
+        upstreamCostSource: includeImageDetails && typeof row.detail?.upstreamCostSource === 'string'
+          ? row.detail.upstreamCostSource
+          : undefined,
+        upstreamCostTier: includeImageDetails && typeof row.detail?.upstreamCostTier === 'string'
+          ? row.detail.upstreamCostTier
+          : undefined,
+        upstreamCostQuality: includeImageDetails && typeof row.detail?.upstreamCostQuality === 'string'
+          ? row.detail.upstreamCostQuality
+          : undefined,
         tenantName: tenantNameById.get(row.tenantId) || row.tenantId,
         apiKeyName: apiKeyNameById.get(row.apiKeyId) || row.apiKeyId,
         upstreamName: row.upstreamId ? (upstreamNameById.get(row.upstreamId) || row.upstreamId) : '',
