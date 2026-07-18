@@ -182,6 +182,7 @@ function imageUploadFormats(upstream: ConsoleUpstream) {
     }
     const transports = upstream.imagesConfig.jsonReferenceTransports || [];
     const formats = [
+      ...(upstream.imagesConfig.editProtocolModes.includes('multipart_file_upload') ? ['MULTIPART'] : []),
       ...(transports.includes('url') ? ['URL'] : []),
       ...(transports.includes('base64') ? ['BASE64'] : []),
     ];
