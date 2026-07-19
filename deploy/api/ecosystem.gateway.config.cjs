@@ -1,7 +1,7 @@
 module.exports = {
   apps: [
     {
-      name: process.env.PM2_APP_NAME || 'yali-canvas-api',
+      name: process.env.PM2_APP_NAME || 'yali-canvas-api-gateway',
       cwd: process.env.APP_CWD || process.cwd(),
       script: 'apps/api/dist/src/server.js',
       interpreter: 'node',
@@ -28,29 +28,6 @@ module.exports = {
         GENERATED_IMAGE_ACCEL_REDIRECT_TARGET_DIR: process.env.GENERATED_IMAGE_ACCEL_REDIRECT_TARGET_DIR,
         GRACEFUL_SHUTDOWN_TIMEOUT_MS: process.env.GRACEFUL_SHUTDOWN_TIMEOUT_MS || 11 * 60_000,
         GATEWAY_INSTANCE_ID: process.env.GATEWAY_INSTANCE_ID,
-      },
-    },
-    {
-      name: process.env.PM2_WORKER_APP_NAME || 'yali-canvas-worker',
-      cwd: process.env.APP_CWD || process.cwd(),
-      script: 'apps/api/dist/src/worker.js',
-      interpreter: 'node',
-      env: {
-        NODE_ENV: process.env.NODE_ENV || 'production',
-        PORT: process.env.PORT || 4010,
-        DATABASE_URL: process.env.DATABASE_URL,
-        PG_SCHEMA: process.env.PG_SCHEMA || 'public',
-        REDIS_URL: process.env.REDIS_URL,
-        ADMIN_DATA_DIR: process.env.ADMIN_DATA_DIR || './data',
-        PROVIDER_DATA_DIR: process.env.PROVIDER_DATA_DIR || './data',
-        PUBLIC_API_BASE_URL: process.env.PUBLIC_API_BASE_URL,
-        ADMIN_USERNAME: process.env.ADMIN_USERNAME,
-        ADMIN_PASSWORD: process.env.ADMIN_PASSWORD,
-        ADMIN_SESSION_SECRET: process.env.ADMIN_SESSION_SECRET,
-        DEFAULT_TEST_REFERENCE_IMAGE_URL: process.env.DEFAULT_TEST_REFERENCE_IMAGE_URL,
-        GENERATED_IMAGE_ACCEL_REDIRECT_PREFIX: process.env.GENERATED_IMAGE_ACCEL_REDIRECT_PREFIX || '/_generated-images',
-        GENERATED_IMAGE_ACCEL_REDIRECT_TARGET_DIR: process.env.GENERATED_IMAGE_ACCEL_REDIRECT_TARGET_DIR,
-        CANVAS_WORKER_ONLY: '1',
       },
     },
   ],

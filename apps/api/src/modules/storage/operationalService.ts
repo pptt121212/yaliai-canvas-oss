@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { operationalRepository } from './operationalStore.js';
+import { gatewayInstanceId } from '../runtime/gatewayIdentity.js';
 import type {
   AuditLogRecord,
   BillingLedgerRecord,
@@ -101,6 +102,10 @@ function sanitizeTraceValue(value: unknown): unknown {
 function sanitizeTraceRecord(input: RequestTraceRecord): RequestTraceRecord {
   return {
     ...input,
+    tags: Array.from(new Set([
+      ...(input.tags || []),
+      `gateway:${gatewayInstanceId}`,
+    ])),
     downstreamRequest: sanitizeTraceValue(input.downstreamRequest || null) as Record<string, unknown> | null,
     downstreamResponse: sanitizeTraceValue(input.downstreamResponse || null) as Record<string, unknown> | null,
     upstreamRequest: sanitizeTraceValue(input.upstreamRequest || null) as Record<string, unknown> | null,

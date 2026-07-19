@@ -241,6 +241,7 @@ pm2 start deploy/api/ecosystem.config.cjs
 - [集成说明](./docs/integration-guide.md)
 - [上游管理说明](./docs/provider-management.md)
 - [上游图像兼容性](./docs/upstream-image-compatibility.md)
+- [未来 API 网关负载扩展](./docs/gateway-scaling.md)
 
 ## 许可协议
 

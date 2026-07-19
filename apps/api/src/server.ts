@@ -36,6 +36,7 @@ import {
 } from './modules/imageResolutionAudit.js';
 import { resolveImageCapabilityCost } from './modules/imageCapabilityMatrix.js';
 import { dynamicOverloadGuard } from './modules/runtime/dynamicOverloadGuard.js';
+import { gatewayInstanceId } from './modules/runtime/gatewayIdentity.js';
 import { startOperationalRollupScheduler } from './modules/operationalRollups.js';
 import {
   appendAuditRecord,
@@ -102,6 +103,7 @@ const app = Fastify({
   logger: true,
   bodyLimit: requestBodyLimitBytes,
 });
+let gatewayAcceptingTraffic = false;
 requireDatabaseUrl('api_server');
 requireSharedHotState('api_server');
 const port = Number(process.env.PORT || 4010);
@@ -930,7 +932,24 @@ app.options('*', async (_request, reply) => {
 app.get('/health', async () => ({
   ok: true,
   service: '@yali/api',
+  gatewayInstance: gatewayInstanceId,
 }));
+
+app.get('/ready', async (_request, reply) => {
+  const overload = dynamicOverloadGuard.getSnapshot(adminControlPlaneStore.get().publicApi);
+  const ready = gatewayAcceptingTraffic && !overload.overloaded;
+  reply.header('Cache-Control', 'no-store');
+  if (!ready) {
+    reply.code(503);
+  }
+  return {
+    ok: ready,
+    service: '@yali/api',
+    gatewayInstance: gatewayInstanceId,
+    state: gatewayAcceptingTraffic ? (overload.overloaded ? 'overloaded' : 'ready') : 'draining',
+    ...(overload.overloaded ? { reasons: overload.reasons } : {}),
+  };
+});
 
 app.get('/v1/providers', async () => ({
   providers: providerRegistry.list(),
@@ -8955,7 +8974,8 @@ async function closeApiServer(signal: NodeJS.Signals) {
     return;
   }
   gracefulShutdownStarted = true;
-  app.log.info({ signal, gracefulShutdownTimeoutMs }, 'api_server_graceful_shutdown_started');
+  gatewayAcceptingTraffic = false;
+  app.log.info({ signal, gracefulShutdownTimeoutMs, gatewayInstance: gatewayInstanceId }, 'api_server_graceful_shutdown_started');
   const forceExitTimer = setTimeout(() => {
     app.log.error({ signal, gracefulShutdownTimeoutMs }, 'api_server_graceful_shutdown_timed_out');
     process.exit(1);
@@ -8979,6 +8999,8 @@ process.once('SIGTERM', () => {
 });
 
 app.listen({ port, host }).then(() => {
+  gatewayAcceptingTraffic = true;
+  app.log.info({ gatewayInstance: gatewayInstanceId, port, host }, 'api_gateway_ready');
   if (typeof process.send === 'function') {
     process.send('ready');
   }

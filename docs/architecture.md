@@ -43,6 +43,19 @@ Production mode uses:
 - A separate worker process for canvas workflow queue execution.
 - Nginx or another reverse proxy for TLS, static assets, body-size limits, and internal generated-image acceleration.
 
+### Future Gateway Scaling
+
+The default deployment remains a single complete server. When downstream API traffic grows, additional servers may run the API gateway only and share the existing PostgreSQL and Redis instances. A separate load balancer then distributes new `/v1/` requests to a selected gateway; that selected gateway calls the upstream provider and returns the image response directly to the downstream client. Image bytes must not be relayed back through the original server.
+
+The API exposes two operational probes:
+
+- `/health`: process liveness. It remains available during graceful shutdown for diagnosis.
+- `/ready`: load-balancer eligibility. It returns `503` while the API is draining or when the enabled local overload guard has marked the node overloaded.
+
+Every request trace includes a `gateway:<instance-id>` tag. Set `GATEWAY_INSTANCE_ID` to a stable, unique node name only when deploying multiple gateway servers. The single-server default needs no setting.
+
+Generated-image and canvas-reference directories remain local in the single-server topology. Before multiple gateway nodes are allowed to return local generated-image URLs or serve shared reference assets, use a shared storage implementation. This is deliberately deferred and is not required for the default deployment.
+
 `DATABASE_URL` is required in every API process. Redis is required when running more than one API process and whenever the canvas Worker is enabled: route hot state, counters, task claims, and locks must be shared across processes. A single API process may omit Redis only for local development without the Worker.
 
 ## Request Flow

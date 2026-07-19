@@ -155,6 +155,7 @@ export NODE_ENV=production
 export APP_CWD=/opt/yaliai-canvas-oss/app
 export PORT=4010
 export HOST=0.0.0.0
+export GATEWAY_INSTANCE_ID='gateway-main' # optional in single-server mode; unique per gateway when scaled
 export DATABASE_URL='postgresql://yali_canvas:replace-with-a-strong-password@127.0.0.1:5432/yali_canvas'
 export PG_SCHEMA=public
 export REDIS_URL='redis://127.0.0.1:6379'
@@ -175,6 +176,7 @@ Important runtime tuning variables:
 | `PM2_API_INSTANCES` | `2` | Number of clustered API processes. |
 | `PM2_API_KILL_TIMEOUT_MS` | `660000` | Maximum time PM2 waits for an in-flight API request during reload. |
 | `GRACEFUL_SHUTDOWN_TIMEOUT_MS` | `660000` | API process drain timeout after `SIGINT` or `SIGTERM`; keep it at least as large as the longest upstream request timeout. |
+| `GATEWAY_INSTANCE_ID` | unset | Optional stable API gateway node ID. Set a unique value on each server only when using a load balancer. |
 | `PG_POOL_MAX` | `12` | PostgreSQL pool size per process. |
 | `API_REQUEST_BODY_LIMIT_BYTES` | `134217728` | Downstream request body limit. Match Nginx `client_max_body_size`. |
 | `IMAGE_PAYLOAD_MAX_BYTES` | `12582912` | Absolute hard cap for one input image. It cannot exceed 12MiB. |
@@ -252,7 +254,7 @@ The example config:
 
 - serves `apps/web/dist` at `/`
 - serves `apps/admin/dist` at `/admin/`
-- proxies `/v1/` and `/health` to `apps/api`
+- proxies `/v1/`, `/health`, and `/ready` to `apps/api`
 - sets `client_max_body_size 128m`
 - enables gzip for JSON/text/static responses
 - keeps SSE latency safe by not gzipping `text/event-stream`
@@ -383,6 +385,7 @@ pg_dump "$DATABASE_URL" > yaliai-canvas-oss-$(date +%F).sql
 - [API-only deployment](./deployment-api-only.md)
 - [Web-only deployment](./deployment-web-only.md)
 - [Combined deployment](./deployment-combined.md)
+- [Future API gateway scaling](./gateway-scaling.md)
 
 ## 15. Related Documents
 
