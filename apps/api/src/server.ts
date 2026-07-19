@@ -1,4 +1,4 @@
-﻿import Fastify from 'fastify';
+import Fastify from 'fastify';
 import multipart from '@fastify/multipart';
 import crypto from 'node:crypto';
 import { scryptSync, timingSafeEqual } from 'node:crypto';
@@ -903,6 +903,9 @@ type RequestAccessContext = {
   maxConcurrency?: number;
   tenantRequestLimitPerMinute?: number;
   requestLimitPerMinute?: number;
+  downstreamImageApiType?: 'openai_images' | 'banana_images';
+  bananaAllowedModels?: string[];
+  bananaAllowedImageSizes?: Array<'1k' | '2k' | '4k'>;
 };
 
 type AsyncQueuedTaskInternalState = {
@@ -2104,6 +2107,9 @@ function buildCanvasUserApiKeyPayload(apiKey: ConsoleApiKey, defaultApiKeyId?: s
     maskedKey: apiKey.maskedKey,
     rawKey: apiKey.rawKey || '',
     isDefault: apiKey.id === defaultApiKeyId,
+    downstreamImageApiType: apiKey.downstreamImageApiType || 'openai_images',
+    bananaAllowedModels: apiKey.bananaAllowedModels || [],
+    bananaAllowedImageSizes: apiKey.bananaAllowedImageSizes || [],
     imagePricingMode: fixedImageFlatPrice > 0 ? 'fixed_flat' : 'pricing_matrix',
     fixedImageFlatPrice,
   };
@@ -3666,6 +3672,9 @@ async function resolveRequestAccessContext(
           maxConcurrency: Math.max(1, Number(apiKey.maxConcurrency || 10)),
           tenantRequestLimitPerMinute: Number(tenant.requestLimitPerMinute || 0),
           requestLimitPerMinute: Number(apiKey.requestLimitPerMinute || 0),
+          downstreamImageApiType: apiKey.downstreamImageApiType || 'openai_images',
+          bananaAllowedModels: apiKey.bananaAllowedModels || [],
+          bananaAllowedImageSizes: apiKey.bananaAllowedImageSizes || [],
         },
       };
     }
@@ -3811,6 +3820,9 @@ async function resolveRequestAccessContext(
       maxConcurrency: Math.max(1, Number(apiKey.maxConcurrency || 10)),
       tenantRequestLimitPerMinute: Number(tenant.requestLimitPerMinute || 0),
       requestLimitPerMinute: Number(apiKey.requestLimitPerMinute || 0),
+      downstreamImageApiType: apiKey.downstreamImageApiType || 'openai_images',
+      bananaAllowedModels: apiKey.bananaAllowedModels || [],
+      bananaAllowedImageSizes: apiKey.bananaAllowedImageSizes || [],
     },
   };
 }
@@ -4677,6 +4689,10 @@ function responseContainsUsableImageOutput(input: {
     return false;
   }
 
+  if (String(input.protocol || '') === 'gemini_generate_content') {
+    return candidates.some((candidate) => hasBananaImageOutput(candidate));
+  }
+
   for (const candidate of candidates) {
     if (!candidate || typeof candidate !== 'object') {
       continue;
@@ -4854,6 +4870,85 @@ function imageEndpointError(input: {
     statusCode: input.statusCode,
     failureCategory: input.failureCategory || (input.statusCode === 429 ? 'retryable_overloaded' : 'terminal_user_content'),
     details: input.details,
+  });
+}
+
+function imageApiTypeMismatchError(expected: 'openai_images' | 'banana_images') {
+  return imageEndpointError({
+    code: 'api_key_interface_type_mismatch',
+    message: expected === 'banana_images'
+      ? 'This API key is configured for the OpenAI Images interface, not the Banana image interface.'
+      : 'This API key is configured for the Banana image interface, not the OpenAI Images interface.',
+    statusCode: 403,
+    failureCategory: 'terminal_auth',
+  });
+}
+
+const bananaInlineDataSchema = z.object({
+  mimeType: z.string().trim().min(1).max(128),
+  data: z.string().trim().min(1),
+});
+const bananaPartSchema = z.object({
+  text: z.string().optional(),
+  inlineData: bananaInlineDataSchema.optional(),
+  inline_data: bananaInlineDataSchema.optional(),
+}).passthrough();
+const bananaGenerateContentSchema = z.object({
+  contents: z.array(z.object({
+    role: z.string().optional(),
+    parts: z.array(bananaPartSchema).min(1),
+  })).min(1),
+  generationConfig: z.object({
+    imageConfig: z.object({
+      aspectRatio: z.string().trim().min(1).max(32).optional(),
+      imageSize: z.string().trim().optional(),
+    }).optional(),
+  }).optional(),
+}).passthrough();
+
+function buildBananaNativeError(statusCode: number, message: string, code: string) {
+  return {
+    error: {
+      code: statusCode,
+      message,
+      status: code,
+    },
+  };
+}
+
+function parseBananaPayload(model: string, body: unknown) {
+  const request = bananaGenerateContentSchema.parse(body);
+  const parts = request.contents.flatMap((content) => content.parts);
+  const prompt = parts
+    .map((part) => String(part.text || '').trim())
+    .filter(Boolean)
+    .join('\n');
+  if (!prompt) {
+    throw new z.ZodError([{ code: z.ZodIssueCode.custom, path: ['contents'], message: 'A Banana image request needs at least one text part.' }]);
+  }
+  const references = parts.flatMap((part) => {
+    const inline = part.inlineData || part.inline_data;
+    if (!inline) {
+      return [];
+    }
+    return [`data:${inline.mimeType};base64,${inline.data.replace(/\s+/g, '')}`];
+  });
+  const imageSize = normalizeBananaImageSize(request.generationConfig?.imageConfig?.imageSize);
+  if (!imageSize) {
+    throw new z.ZodError([{ code: z.ZodIssueCode.custom, path: ['generationConfig', 'imageConfig', 'imageSize'], message: 'imageSize must be 1K, 2K, or 4K.' }]);
+  }
+  const aspectRatio = String(request.generationConfig?.imageConfig?.aspectRatio || '1:1').trim();
+  return openAIImagesSchema.parse({
+    model,
+    prompt,
+    size: imageSize,
+    n: 1,
+    ...(references.length ? { image: references } : {}),
+    extra_body: {
+      banana_protocol: true,
+      banana_image_size: imageSize,
+      banana_aspect_ratio: aspectRatio,
+    },
   });
 }
 
@@ -5067,6 +5162,15 @@ function resolveEnabledImageProvidersForOperation(operation: 'generations' | 'ed
   return providers.filter((provider) => provider.capability?.supportsImageEdit !== false);
 }
 
+function isBananaImagePayload(payload: z.infer<typeof openAIImagesSchema>) {
+  return payload.extra_body?.banana_protocol === true;
+}
+
+function normalizeBananaImageSize(value: unknown): '1k' | '2k' | '4k' | null {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === '1k' || normalized === '2k' || normalized === '4k' ? normalized : null;
+}
+
 function extractUpstreamErrorMessage(input: { bodyJson?: unknown; bodyText?: string }) {
   if (input.bodyJson && typeof input.bodyJson === 'object' && !Array.isArray(input.bodyJson)) {
     const record = input.bodyJson as Record<string, unknown>;
@@ -5144,14 +5248,18 @@ async function buildSmartExecutionPreview(input: {
       candidates: [{
         provider: resolved.provider,
         payload: adaptedPayload,
-        requestPlan: buildImageRequestPlanForProvider(resolved.provider, input.operation, adaptedPayload),
+        requestPlan: await buildImageRequestPlanForProvider(resolved.provider, input.operation, adaptedPayload),
         reasons: ['user_supplied'],
       }],
       filteredOut: [],
     };
   }
 
-  const channelProviders = resolveEnabledImageProvidersForOperation(input.operation);
+  const bananaRequest = isBananaImagePayload(payload);
+  const channelProviders = resolveEnabledImageProvidersForOperation(input.operation)
+    .filter((provider) => bananaRequest
+      ? provider.protocol === 'gemini_generate_content'
+      : provider.protocol !== 'gemini_generate_content');
   const isFixedProviderRoute = mode === 'fixed_provider' || mode === 'fixed_provider_pool';
   const fixedProviderIds = normalizeFixedImageProviderIds(
     input.accessContext.fixedImageProviderIds,
@@ -5182,6 +5290,9 @@ async function buildSmartExecutionPreview(input: {
       requestMode: payload.async ? 'async' : 'sync',
       hasReferenceImage: payloadHasReferenceImages(payload),
       requestedModel: payload.model,
+      protocolFamily: bananaRequest ? 'banana_image' : 'openai_image',
+      bananaImageSize: bananaRequest ? normalizeBananaImageSize(payload.extra_body?.banana_image_size) || undefined : undefined,
+      bananaAspectRatio: bananaRequest ? String(payload.extra_body?.banana_aspect_ratio || '').trim() || undefined : undefined,
       ignoreTierQualityCapability: isFixedProviderRoute,
       ignoreRuntimeBlock: mode === 'fixed_provider',
     },
@@ -5203,7 +5314,7 @@ async function buildSmartExecutionPreview(input: {
       candidates.push({
         provider: candidate.provider,
         payload: adaptedPayload,
-        requestPlan: buildImageRequestPlanForProvider(candidate.provider, input.operation, adaptedPayload),
+        requestPlan: await buildImageRequestPlanForProvider(candidate.provider, input.operation, adaptedPayload),
         score: candidate.score,
         reasons: candidate.reasons,
       });
@@ -5352,6 +5463,13 @@ function resolveImageSellPriceCents(input: {
   return Math.max(0, yuanToMinorUnits(resolveImageSellPrice(input)));
 }
 
+function resolveBananaImageSellPriceCents(model: string, imageSize: '1k' | '2k' | '4k') {
+  const row = (adminConsoleCatalogStore.get().bananaImagePricingMatrix || []).find((item) => (
+    item.model === model && item.imageSize === imageSize
+  ));
+  return Math.max(0, yuanToMinorUnits(Number(row?.price || 0)));
+}
+
 function resolveChatCompletionsSellPriceCents() {
   const catalog = adminConsoleCatalogStore.get();
   const yuan = Number(catalog.chatCompletionsUnitPriceYuan);
@@ -5498,6 +5616,87 @@ async function buildActualImageBilling(input: {
 }) {
   if (input.accessContext.authMode !== 'tenant_key') {
     return { totalChargedCredits: 0, billedImages: 0, financeDetail: {}, billingRecords: [] as BillingLedgerRecord[] };
+  }
+
+  if (input.providerProtocol === 'gemini_generate_content') {
+    const imageSize = normalizeBananaImageSize(input.requestPlanBody?.generationConfig
+      && typeof input.requestPlanBody.generationConfig === 'object'
+      ? (input.requestPlanBody.generationConfig as Record<string, unknown>).imageConfig
+        && typeof (input.requestPlanBody.generationConfig as Record<string, unknown>).imageConfig === 'object'
+        ? ((input.requestPlanBody.generationConfig as Record<string, unknown>).imageConfig as Record<string, unknown>).imageSize
+        : undefined
+      : input.payload.extra_body?.banana_image_size)
+      || normalizeBananaImageSize(input.payload.extra_body?.banana_image_size);
+    if (!imageSize) {
+      return { totalChargedCredits: 0, billedImages: 0, financeDetail: {}, billingRecords: [] as BillingLedgerRecord[] };
+    }
+    const fixedUnitCents = resolveFixedApiKeyImageSellPriceCents(input.accessContext);
+    const chargedCredits = fixedUnitCents > 0
+      ? fixedUnitCents
+      : resolveBananaImageSellPriceCents(input.payload.model, imageSize);
+    const catalog = adminConsoleCatalogStore.get();
+    const upstream = catalog.upstreams.find((item) => item.id === input.upstreamId);
+    const capability = upstream?.bananaConfig?.modelCapabilities.find((item) => item.model === input.payload.model);
+    const hasConfiguredCost = Boolean(capability?.costs && Object.prototype.hasOwnProperty.call(capability.costs, imageSize));
+    const costYuan = Number(capability?.costs?.[imageSize] || 0);
+    const upstreamCostCredits = hasConfiguredCost && Number.isFinite(costYuan) && costYuan >= 0
+      ? yuanToMinorUnits(costYuan)
+      : 0;
+    const resultCount = Math.max(1, collectBananaInlineDataParts(input.responsePayload).length || 1);
+    const billingRecords = Array.from({ length: resultCount }, (_, index) => ({
+      id: stableOperationalId('billing', input.taskId, index, input.payload.model, imageSize),
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      tenantId: input.accessContext.tenantId,
+      apiKeyId: input.accessContext.apiKeyId,
+      channelId: imageChannelId,
+      upstreamId: input.upstreamId,
+      requestId: input.requestId,
+      taskId: input.taskId,
+      operation: input.operation,
+      currency: 'cny' as const,
+      reservedCredits: chargedCredits,
+      chargedCredits,
+      status: chargedCredits > 0 ? 'charged' as const : 'voided' as const,
+      model: input.payload.model,
+      size: imageSize,
+      detail: {
+        idempotencyKey: stableOperationalId('banana_image_charge', input.taskId, index),
+        protocol: 'banana_images',
+        submittedModel: input.payload.model,
+        submittedImageSize: imageSize,
+        submittedAspectRatio: String(input.payload.extra_body?.banana_aspect_ratio || '') || null,
+        billedModel: input.payload.model,
+        billedTier: imageSize,
+        billingMode: fixedUnitCents > 0 ? 'fixed_provider_flat_price' : 'banana_model_image_size_price',
+        billingModeLabel: fixedUnitCents > 0 ? '固定线路一口价' : 'Banana 模型与尺寸定价',
+        upstreamCostConfigured: hasConfiguredCost,
+        upstreamCostMinorUnits: hasConfiguredCost ? upstreamCostCredits : null,
+        upstreamCostYuan: hasConfiguredCost ? minorUnitsToYuan(upstreamCostCredits) : null,
+        upstreamCostModel: input.payload.model,
+        upstreamCostImageSize: imageSize,
+      },
+    }));
+    const totalChargedCredits = chargedCredits * resultCount;
+    return {
+      totalChargedCredits,
+      billedImages: resultCount,
+      billingRecords,
+      financeDetail: {
+        source: 'banana_image_request_charge',
+        requestId: input.requestId,
+        taskId: input.taskId,
+        operation: input.operation,
+        protocol: 'gemini_generate_content',
+        protocolLabel: 'Banana 图像接口',
+        requestedModel: input.payload.model,
+        requestedImageSize: imageSize,
+        requestedAspectRatio: String(input.payload.extra_body?.banana_aspect_ratio || '') || null,
+        billingMode: fixedUnitCents > 0 ? 'fixed_provider_flat_price' : 'banana_model_image_size_price',
+        billedImages: resultCount,
+        amountCents: totalChargedCredits,
+      },
+    };
   }
 
   const submittedSize = input.submittedSize || resolveSubmittedImageSize({
@@ -5990,6 +6189,36 @@ function collectImageLikeOutputs(value: unknown, results: Array<Record<string, u
     collectImageLikeOutputs(child, results);
   }
   return results;
+}
+
+function collectBananaInlineDataParts(value: unknown, results: Array<{ mimeType: string; data: string }> = []) {
+  if (!value || typeof value !== 'object') {
+    return results;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectBananaInlineDataParts(item, results);
+    }
+    return results;
+  }
+  const record = value as Record<string, unknown>;
+  const inline = record.inlineData || record.inline_data;
+  if (inline && typeof inline === 'object' && !Array.isArray(inline)) {
+    const inlineRecord = inline as Record<string, unknown>;
+    const data = String(inlineRecord.data || '').replace(/\s+/g, '');
+    const mimeType = String(inlineRecord.mimeType || inlineRecord.mime_type || 'image/png').trim();
+    if (data && /^image\//i.test(mimeType)) {
+      results.push({ mimeType, data });
+    }
+  }
+  for (const child of Object.values(record)) {
+    collectBananaInlineDataParts(child, results);
+  }
+  return results;
+}
+
+function hasBananaImageOutput(value: unknown) {
+  return collectBananaInlineDataParts(value).length > 0;
 }
 
 function toOpenAIImageDataItem(item: Record<string, unknown>, responseFormat?: DownstreamImageResponseFormat) {
@@ -7032,6 +7261,163 @@ async function replyWithProxyResult(
   };
 }
 
+// Fastify treats a colon after a parameter name as another parameter boundary.
+// Restrict the model segment so the literal :generateContent suffix remains intact.
+app.post('/v1beta/models/:model(^[^:]+):generateContent', async (request, reply) => {
+  const requestStartedAt = Date.now();
+  const params = z.object({ model: z.string().trim().min(1).max(240) }).parse(request.params);
+  const payload = parseBananaPayload(params.model, request.body);
+  validateOpenAIImagesPayloadLimits(payload);
+  const { publicApi, imageChannel } = getImageChannelRuntimeConfig();
+  if (!publicApi.enabled || publicApi.exposeGenerations === false || !imageChannel || imageChannel.enabled === false) {
+    reply.code(503);
+    return buildBananaNativeError(503, 'Image generation API is currently disabled.', 'UNAVAILABLE');
+  }
+  const accessResult = await resolveRequestAccessContext({
+    ...(request.headers as Record<string, unknown>),
+    'x-api-key': String(request.headers['x-goog-api-key'] || request.headers['x-api-key'] || ''),
+  }, payload, request);
+  if (!accessResult.granted) {
+    reply.code(accessResult.statusCode);
+    return buildBananaNativeError(accessResult.statusCode, accessResult.message, 'UNAUTHENTICATED');
+  }
+  const accessContext = accessResult.context;
+  if (accessContext.authMode === 'tenant_key' && accessContext.downstreamImageApiType !== 'banana_images') {
+    reply.code(403);
+    return buildBananaNativeError(403, 'This API key is not configured for the Banana image interface.', 'PERMISSION_DENIED');
+  }
+  const imageSize = normalizeBananaImageSize(payload.extra_body?.banana_image_size)!;
+  if (accessContext.authMode === 'tenant_key') {
+    if (accessContext.bananaAllowedModels?.length && !accessContext.bananaAllowedModels.includes(payload.model)) {
+      reply.code(403);
+      return buildBananaNativeError(403, 'This API key is not allowed to use the requested Banana model.', 'PERMISSION_DENIED');
+    }
+    if (accessContext.bananaAllowedImageSizes?.length && !accessContext.bananaAllowedImageSizes.includes(imageSize)) {
+      reply.code(403);
+      return buildBananaNativeError(403, 'This API key is not allowed to use the requested Banana image size.', 'PERMISSION_DENIED');
+    }
+    const fixedPrice = resolveFixedApiKeyImageSellPriceCents(accessContext);
+    if (fixedPrice <= 0 && resolveBananaImageSellPriceCents(payload.model, imageSize) <= 0) {
+      reply.code(422);
+      return buildBananaNativeError(422, 'No Banana selling price is configured for this model and imageSize.', 'FAILED_PRECONDITION');
+    }
+  }
+  const budget = await ensureTenantPositiveBalance({ accessContext });
+  if (!budget.allowed) {
+    reply.code(402);
+    return buildBananaNativeError(402, `Insufficient tenant balance. Current balance: ${formatCnyMinorUnits(Number(budget.balanceCents || 0), 2)} CNY.`, 'RESOURCE_EXHAUSTED');
+  }
+  const rateLimit = await consumeImageRateLimits(accessContext);
+  if (!rateLimit.allowed || isDynamicOverloadProtectionActive()) {
+    reply.header('Retry-After', '5');
+    reply.code(429);
+    return buildBananaNativeError(429, 'The image API is temporarily overloaded. Please retry.', 'RESOURCE_EXHAUSTED');
+  }
+  const concurrency = await acquireApiKeyConcurrency(accessContext);
+  if (!concurrency.allowed) {
+    reply.code(429);
+    return buildBananaNativeError(429, 'The API key has reached its max concurrent image requests.', 'RESOURCE_EXHAUSTED');
+  }
+  const globalConcurrency = await acquireGlobalImageConcurrency();
+  if (!globalConcurrency.allowed) {
+    await releaseApiKeyConcurrency(concurrency.key);
+    reply.code(429);
+    return buildBananaNativeError(429, 'The image API has reached its global max concurrent request limit.', 'RESOURCE_EXHAUSTED');
+  }
+  try {
+    const result = await executeUpstreamImageRequest({
+      request,
+      payload,
+      operation: payloadHasReferenceImages(payload) ? 'edits' : 'generations',
+      accessContext,
+    });
+    const taskId = createRuntimeTaskId('banana');
+    const statusCode = result?.response.statusCode || 503;
+    const responseBody = result?.response.bodyJson;
+    const ok = Boolean(result?.response.ok && responseBody);
+    const nativeError = ok
+      ? null
+      : buildBananaNativeError(statusCode, extractUpstreamErrorMessage({
+        bodyJson: result?.response.bodyJson,
+        bodyText: result?.response.bodyText,
+      }), statusCode >= 500 ? 'UNAVAILABLE' : 'FAILED_PRECONDITION');
+    if (result) {
+      const responsePayload = {
+        statusCode,
+        body: responseBody || nativeError,
+        requestMeta: {
+          protocol: 'banana_images',
+          model: payload.model,
+          imageSize,
+          aspectRatio: payload.extra_body?.banana_aspect_ratio || null,
+        },
+      };
+      void enqueueImageGatewayPersistence({
+        taskId,
+        requestId: taskId,
+        accessContext,
+        payload: result.payload,
+        requestPlanBody: result.resolved.requestPlan.body,
+        operation: payloadHasReferenceImages(payload) ? 'edits' : 'generations',
+        providerId: result.resolved.provider.providerId,
+        providerProtocol: result.resolved.provider.protocol,
+        providerSource: result.resolved.provider.source,
+        providerBaseUrl: result.resolved.provider.baseUrl,
+        status: ok ? 'completed' : 'failed',
+        createdAt: requestStartedAt,
+        updatedAt: Date.now(),
+        completedAt: ok ? Date.now() : undefined,
+        responseStatusCode: statusCode,
+        responseBodyJson: responseBody,
+        responseBodyText: result.response.bodyText,
+        responseContentType: result.response.contentType,
+        errorPayload: nativeError,
+        responsePayload,
+      });
+      const trace = {
+        source: 'tenant_runtime_sync' as const,
+        scope: 'full_chain' as const,
+        status: ok ? 'success' as const : 'failed' as const,
+        summary: `banana ${ok ? 'success' : 'failed'}`,
+        createdAt: requestStartedAt,
+        requestId: taskId,
+        taskId,
+        tenantId: accessContext.tenantId,
+        apiKeyId: accessContext.apiKeyId,
+        channelId: imageChannelId,
+        upstreamId: result.resolved.provider.providerId,
+        upstreamName: result.resolved.provider.name,
+        providerBaseUrl: result.resolved.provider.baseUrl,
+        operation: payloadHasReferenceImages(payload) ? 'edits' as const : 'generations' as const,
+        statusCode,
+        downstreamRequest: { headers: request.headers, payload: request.body as Record<string, unknown> },
+        downstreamResponse: { statusCode, body: responseBody || nativeError },
+        upstreamRequest: { ...result.resolved.requestPlan, routing: result.routing },
+        upstreamResponse: { ok, statusCode, bodyJson: responseBody, bodyText: result.response.bodyText },
+        errorPayload: nativeError,
+        tags: ['runtime', 'sync', 'banana'],
+      };
+      void appendRequestTrace(ok ? compactSuccessfulImagePayloadForStorage(trace) as Parameters<typeof appendRequestTrace>[0] : trace);
+      if (ok) {
+        void providerRegistry.reportAttempt({
+          providerId: result.resolved.provider.providerId,
+          ok: true,
+          statusCode,
+          failedAt: Date.now(),
+          affectsHealth: false,
+          latencyMs: latestProviderAttemptDurationMs(result.routing.provider_attempts || [], result.resolved.provider.providerId),
+        });
+      }
+    }
+    await releaseImageConcurrency(concurrency.key, globalConcurrency.key);
+    reply.code(statusCode);
+    return ok ? responseBody : nativeError;
+  } catch (error) {
+    await releaseImageConcurrency(concurrency.key, globalConcurrency.key);
+    throw error;
+  }
+});
+
 app.post('/v1/images/generations', async (request, reply) => {
   const requestStartedAt = Date.now();
   let payload = normalizePublicOpenAIImagesPayload(openAIImagesSchema.parse(
@@ -7068,6 +7454,11 @@ app.post('/v1/images/generations', async (request, reply) => {
     });
   }
   const accessContext = accessResult.context;
+  if (accessContext.authMode === 'tenant_key' && accessContext.downstreamImageApiType === 'banana_images') {
+    const errorPayload = imageApiTypeMismatchError('openai_images');
+    reply.code(403);
+    return errorPayload;
+  }
   payload = applyImageQualityCapToPayload(payload, accessContext);
   const budget = await ensureTenantPositiveBalance({
     accessContext,
@@ -7307,6 +7698,11 @@ app.post('/v1/images/edits', async (request, reply) => {
     });
   }
   const accessContext = accessResult.context;
+  if (accessContext.authMode === 'tenant_key' && accessContext.downstreamImageApiType === 'banana_images') {
+    const errorPayload = imageApiTypeMismatchError('openai_images');
+    reply.code(403);
+    return errorPayload;
+  }
   payload = applyImageQualityCapToPayload(payload, accessContext);
   const budget = await ensureTenantPositiveBalance({
     accessContext,

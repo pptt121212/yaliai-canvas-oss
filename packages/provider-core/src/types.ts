@@ -24,6 +24,8 @@ export type ProviderProtocol =
   | 'openai_images'
   | 'openai_responses'
   | 'openai_chat'
+  // Gemini-compatible native image generation endpoint used by Banana.
+  | 'gemini_generate_content'
   | 'custom_async_media';
 
 export type ProviderCapability = {

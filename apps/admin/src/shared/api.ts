@@ -7,6 +7,7 @@ import type {
   ConsoleChannel,
   ConsoleTenant,
   ConsoleUpstream,
+  BananaImageSellPriceRow,
   ImageSellPriceRow,
   OnboardingAnalyzeRequest,
   OnboardingAnalyzeJob,
@@ -221,10 +222,14 @@ export async function saveChannel(channel: ConsoleChannel) {
   });
 }
 
-export async function saveImagePricing(rows: ImageSellPriceRow[], chatCompletionsUnitPriceYuan = 0) {
+export async function saveImagePricing(
+  rows: ImageSellPriceRow[],
+  bananaRows: BananaImageSellPriceRow[],
+  chatCompletionsUnitPriceYuan = 0,
+) {
   return requestJson<AdminConsoleCatalog>('/v1/admin/catalog/image-pricing', {
     method: 'POST',
-    body: JSON.stringify({ rows, chatCompletionsUnitPriceYuan }),
+    body: JSON.stringify({ rows, bananaRows, chatCompletionsUnitPriceYuan }),
   });
 }
 

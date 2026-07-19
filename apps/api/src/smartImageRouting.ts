@@ -33,6 +33,9 @@ export type ImageRoutingRequestContext = {
   requestMode: 'sync' | 'async';
   hasReferenceImage: boolean;
   requestedModel: string;
+  protocolFamily?: 'openai_image' | 'banana_image';
+  bananaImageSize?: '1k' | '2k' | '4k';
+  bananaAspectRatio?: string;
   ignoreTierQualityCapability?: boolean;
   ignoreRuntimeBlock?: boolean;
 };
@@ -201,6 +204,61 @@ function providerCapabilityCost(
   return { value: resolved.value, source: resolved.source };
 }
 
+type BananaCapabilityMetadata = {
+  model?: unknown;
+  imageSizes?: unknown;
+  aspectRatios?: unknown;
+  supportsReferenceImages?: unknown;
+  costs?: unknown;
+};
+
+function providerBananaCapabilities(provider: ProviderConfig): BananaCapabilityMetadata[] {
+  const capabilities = provider.metadata?.banana_model_capabilities;
+  return Array.isArray(capabilities) ? capabilities as BananaCapabilityMetadata[] : [];
+}
+
+function providerBananaCapability(provider: ProviderConfig, model: string) {
+  return providerBananaCapabilities(provider).find((item) => String(item.model || '').trim() === model) || null;
+}
+
+function providerSupportsBananaRequest(provider: ProviderConfig, context: ImageRoutingRequestContext) {
+  if (provider.protocol !== 'gemini_generate_content') {
+    return 'protocol_not_banana';
+  }
+  const capability = providerBananaCapability(provider, context.requestedModel);
+  if (!capability) {
+    return 'banana_model_not_supported';
+  }
+  const imageSize = context.bananaImageSize;
+  const sizes = Array.isArray(capability.imageSizes) ? capability.imageSizes : [];
+  if (imageSize && !sizes.includes(imageSize)) {
+    return `banana_image_size_${imageSize}_not_supported`;
+  }
+  const requestedAspect = String(context.bananaAspectRatio || '').trim();
+  const aspects = Array.isArray(capability.aspectRatios) ? capability.aspectRatios : [];
+  if (requestedAspect && aspects.length && !aspects.includes(requestedAspect)) {
+    return `banana_aspect_ratio_${requestedAspect}_not_supported`;
+  }
+  if (context.hasReferenceImage && capability.supportsReferenceImages !== true) {
+    return 'banana_reference_not_supported';
+  }
+  return null;
+}
+
+function providerBananaCost(provider: ProviderConfig, model: string, imageSize?: '1k' | '2k' | '4k') {
+  const capability = providerBananaCapability(provider, model);
+  const costs = capability?.costs && typeof capability.costs === 'object'
+    ? capability.costs as Record<string, unknown>
+    : {};
+  const configured = Boolean(imageSize && Object.prototype.hasOwnProperty.call(costs, imageSize));
+  const value = configured && imageSize ? Number(costs[imageSize]) : 0;
+  return {
+    // A configured zero cost is meaningful and must not be treated as absent.
+    value: configured && Number.isFinite(value) && value >= 0 ? value : 0,
+    source: configured && Number.isFinite(value) && value >= 0 ? 'exact' as const : 'unconfigured' as const,
+  };
+}
+
 function providerResponseFormatCompatibilityReason(
   provider: ProviderConfig,
   responseFormat?: 'url' | 'b64_json',
@@ -261,6 +319,14 @@ function filterProviderForRequest(provider: ProviderConfig, context: ImageRoutin
       temporaryRuntimeBlock: false,
     };
   }
+  if (context.protocolFamily === 'banana_image') {
+    const bananaReason = providerSupportsBananaRequest(provider, context);
+    if (bananaReason) {
+      return { reason: bananaReason, temporaryRuntimeBlock: false };
+    }
+  } else if (provider.protocol === 'gemini_generate_content') {
+    return { reason: 'protocol_not_openai_image', temporaryRuntimeBlock: false };
+  }
   if (context.operation === 'edits' && provider.capability?.supportsImageEdit === false) {
     return {
       reason: 'edit_not_supported',
@@ -303,7 +369,7 @@ function filterProviderForRequest(provider: ProviderConfig, context: ImageRoutin
     };
   }
   const requestedTier = requestTier(context.requestedSize);
-  if (!context.ignoreTierQualityCapability) {
+  if (!context.ignoreTierQualityCapability && context.protocolFamily !== 'banana_image') {
     if (requestedTier !== 'auto' && !hasEnabledImageCapabilityTier(providerCapabilityProfiles(provider), requestedTier)) {
       return {
         reason: `tier_${requestedTier}_not_supported`,
@@ -570,7 +636,11 @@ function priceForProvider(
   provider: ProviderConfig,
   requestedTierValue: 'auto' | '1k' | '2k' | '4k',
   requestedQualityValue: 'auto' | 'low' | 'medium' | 'high',
+  context: ImageRoutingRequestContext,
 ) {
+  if (provider.protocol === 'gemini_generate_content') {
+    return providerBananaCost(provider, context.requestedModel, context.bananaImageSize);
+  }
   return providerCapabilityCost(provider, requestedTierValue, requestedQualityValue);
 }
 
@@ -724,7 +794,7 @@ export async function buildSmartImageRoutingPlan(input: {
     const currentConcurrency = currentProviderConcurrency(provider.providerId);
     const maxConcurrency = resolveProviderConcurrencyMax(provider);
     const concurrencyScore = scoreFromConcurrency(provider);
-    const cost = priceForProvider(provider, tier, quality);
+    const cost = priceForProvider(provider, tier, quality, input.context);
     const successLatency = measuredSuccessLatency(provider);
     const responseFormatCompatibilityReason = providerResponseFormatCompatibilityReason(
       provider,

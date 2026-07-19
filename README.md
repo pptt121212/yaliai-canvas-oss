@@ -81,6 +81,8 @@
   标准 OpenAI Responses 风格接口，用于图像工具链路封装。
 - `Chat Completions`
   标准文本 / 视觉理解接口。
+- `Banana / Gemini Image`
+  原生 `generateContent` 图像接口；下游同样使用其原生 Gemini 请求与响应，不会被伪装成 OpenAI Images。
 
 说明：
 
@@ -242,6 +244,7 @@ pm2 start deploy/api/ecosystem.config.cjs
 - [上游管理说明](./docs/provider-management.md)
 - [上游图像兼容性](./docs/upstream-image-compatibility.md)
 - [未来 API 网关负载扩展](./docs/gateway-scaling.md)
+- [Banana / Gemini 图像接口](./docs/banana-image-api.md)
 
 ## 许可协议
 

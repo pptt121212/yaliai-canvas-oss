@@ -98,6 +98,7 @@ type ChannelsPageProps = {
 const upstreamKindLabels: Record<ConsoleUpstreamKind, string> = {
   images_endpoint: 'Images Endpoint',
   responses_endpoint: 'Responses Endpoint',
+  banana_endpoint: 'Banana / Gemini 图像',
   chat_completions: 'Chat Completions',
 };
 
@@ -106,7 +107,7 @@ const fixedChannels: Record<'channel_image_generation' | 'channel_text_processin
     id: 'channel_image_generation',
     name: '图像生成',
     businessType: 'image_generation',
-    acceptedUpstreamKinds: ['images_endpoint', 'responses_endpoint'],
+    acceptedUpstreamKinds: ['images_endpoint', 'responses_endpoint', 'banana_endpoint'],
     upstreamIds: [],
     upstreamPolicies: [],
     enabled: true,

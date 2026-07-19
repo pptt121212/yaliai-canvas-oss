@@ -1696,8 +1696,10 @@ export function createPostgresOperationalRepository(
               operation,
               nullif(coalesce(detail ->> 'billedTier', detail ->> 'actualTier', detail ->> 'requestedTier', ''), '') as tier,
               nullif(coalesce(detail ->> 'billedQuality', ''), '') as quality,
-              (
-                coalesce(detail ->> 'upstreamCostYuan', '') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+                (
+                  coalesce(detail ->> 'upstreamCostConfigured', '') = 'true'
+                  or
+                  coalesce(detail ->> 'upstreamCostYuan', '') ~ '^-?[0-9]+(\\.[0-9]+)?$'
                 or coalesce(detail ->> 'upstreamCostMinorUnits', '') ~ '^-?[0-9]+$'
                 or coalesce(detail ->> 'upstreamCostCents', '') ~ '^-?[0-9]+$'
               ) as upstream_unit_cost_configured,

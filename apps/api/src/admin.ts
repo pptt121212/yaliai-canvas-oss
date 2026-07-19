@@ -10,7 +10,7 @@ import {
   type ProviderRoutingMode,
 } from '@yali/provider-core';
 import { yuanToMinorUnits } from '@yali/billing-core';
-import { adaptOpenAIImagesPayloadForProvider, buildImageRequestPlanForProvider } from './imageGateway.js';
+import { adaptOpenAIImagesPayloadForProvider, buildBananaRequestPlan, buildImageRequestPlanForProvider } from './imageGateway.js';
 import { providerRegistry } from './providerRegistry.js';
 import { buildSmartImageRoutingPlan, classifyUpstreamFailure } from './smartImageRouting.js';
 import { resolveImageCapabilityCost } from './modules/imageCapabilityMatrix.js';
@@ -57,6 +57,7 @@ const providerSchema = z.object({
     'openai_images',
     'openai_responses',
     'openai_chat',
+    'gemini_generate_content',
     'custom_async_media',
   ]).optional(),
   baseUrl: z.string().url(),
@@ -128,7 +129,7 @@ const controlPlaneSchema = z.object({
 
 const resolutionTierSchema = z.enum(['auto', '1k', '2k', '4k']);
 const billableResolutionTierSchema = z.enum(['auto', '1k', '2k', '4k']);
-const upstreamKindSchema = z.enum(['images_endpoint', 'responses_endpoint', 'chat_completions']);
+const upstreamKindSchema = z.enum(['images_endpoint', 'responses_endpoint', 'banana_endpoint', 'chat_completions']);
 const responseFormatSchema = z.enum(['url', 'b64_json']);
 const outputImageFormatSchema = z.enum(['png', 'webp', 'jpeg']);
 const responsesInputShapeSchema = z.enum(['auto_standard', 'always_multimodal_message']);
@@ -142,6 +143,8 @@ const responsesModerationModeSchema = z.enum(['task_or_omit', 'force_auto', 'for
 const imageToolQualitySchema = z.enum(['auto', 'low', 'medium', 'high']);
 const imageQualityTierSchema = z.enum(['auto', 'low', 'medium', 'high']);
 const imageQualityCapSchema = z.enum(['auto', 'low', 'medium', 'high']);
+const downstreamImageApiTypeSchema = z.enum(['openai_images', 'banana_images']);
+const bananaImageSizeSchema = z.enum(['1k', '2k', '4k']);
 const imageBackgroundModeSchema = z.enum(['omit', 'auto', 'transparent', 'opaque']);
 const imageRoutingModeSchema = z.enum(['smart_priority', 'smart_failover', 'fixed_provider']);
 const imageCapabilityCostMapSchema = z.object({
@@ -158,6 +161,11 @@ const imageCapabilityProfileSchema = z.object({
 const imageSellPriceRowSchema = z.object({
   tier: billableResolutionTierSchema,
   quality: imageQualityTierSchema,
+  price: z.number().nonnegative(),
+});
+const bananaImageSellPriceRowSchema = z.object({
+  model: z.string().trim().min(1).max(240),
+  imageSize: z.enum(['1k', '2k', '4k']),
   price: z.number().nonnegative(),
 });
 const healthStatusSchema = z.preprocess((value) => {
@@ -210,6 +218,24 @@ const chatConfigSchema = z.object({
   supportsTools: z.boolean(),
   supportsVisionInput: z.boolean(),
   upstreamCostYuan: z.number().nonnegative().optional(),
+});
+const bananaModelCapabilitySchema = z.object({
+  model: z.string().trim().min(1).max(240),
+  imageSizes: z.array(bananaImageSizeSchema),
+  aspectRatios: z.array(z.string().trim().min(1).max(32)),
+  supportsReferenceImages: z.boolean(),
+  costs: z.object({
+    '1k': z.number().nonnegative().optional(),
+    '2k': z.number().nonnegative().optional(),
+    '4k': z.number().nonnegative().optional(),
+  }).partial().optional(),
+});
+const bananaConfigSchema = z.object({
+  authMode: z.enum(['x_goog_api_key', 'bearer', 'both']),
+  supportsTextToImage: z.boolean(),
+  supportsImageToImage: z.boolean(),
+  generationPathPrefix: z.string().trim().optional(),
+  modelCapabilities: z.array(bananaModelCapabilitySchema),
 });
 const probeCheckSchema = z.object({
   key: z.string(),
@@ -273,11 +299,13 @@ const consoleUpstreamSchema = z.object({
   }).optional(),
   imagesConfig: imagesConfigSchema.optional(),
   responsesConfig: responsesConfigSchema.optional(),
+  bananaConfig: bananaConfigSchema.optional(),
   chatConfig: chatConfigSchema.optional(),
   detectedConfig: z.object({
     kind: upstreamKindSchema,
     imagesConfig: imagesConfigSchema.optional(),
     responsesConfig: responsesConfigSchema.optional(),
+    bananaConfig: bananaConfigSchema.optional(),
     chatConfig: chatConfigSchema.optional(),
     probe: onboardingProbeSchema,
   }).optional(),
@@ -285,6 +313,7 @@ const consoleUpstreamSchema = z.object({
     kind: upstreamKindSchema.optional(),
     imagesConfig: imagesConfigSchema.partial().optional(),
     responsesConfig: responsesConfigSchema.partial().optional(),
+    bananaConfig: bananaConfigSchema.partial().optional(),
     chatConfig: chatConfigSchema.partial().optional(),
     modelHints: z.array(z.string()).optional(),
   }).optional(),
@@ -606,6 +635,7 @@ const consoleChannelSchema = z.object({
 
 const imagePricingMatrixSchema = z.object({
   rows: z.array(imageSellPriceRowSchema),
+  bananaRows: z.array(bananaImageSellPriceRowSchema).optional(),
   chatCompletionsUnitPrice: z.number().nonnegative().optional(),
   chatCompletionsUnitPriceYuan: z.number().nonnegative().optional(),
 });
@@ -633,6 +663,9 @@ const consoleApiKeySchema = z.object({
   fixedImageProviderIds: z.array(z.string()).optional(),
   fixedImageFlatPrice: z.number().nonnegative().optional(),
   maxImageQuality: imageQualityCapSchema.optional(),
+  downstreamImageApiType: downstreamImageApiTypeSchema.optional(),
+  bananaAllowedModels: z.array(z.string().trim().min(1).max(240)).optional(),
+  bananaAllowedImageSizes: z.array(bananaImageSizeSchema).optional(),
   maskedKey: z.string().min(1),
   rawKey: z.string().optional(),
   keyHash: z.string().optional(),
@@ -2485,9 +2518,23 @@ export async function registerAdminRoutes(app: FastifyInstance) {
   app.post('/v1/admin/catalog/image-pricing', async (request, reply) => {
     requireAdmin(request, reply);
     const body = imagePricingMatrixSchema.parse(request.body);
+    const bananaPricingKeys = body.bananaRows || [];
+    const duplicateBananaPricingKey = bananaPricingKeys.find((row, index) => (
+      bananaPricingKeys.findIndex((candidate) => (
+        candidate.model === row.model && candidate.imageSize === row.imageSize
+      )) !== index
+    ));
+    if (duplicateBananaPricingKey) {
+      reply.code(422);
+      return {
+        error: 'duplicate_banana_pricing_key',
+        message: `Duplicate Banana pricing key: ${duplicateBananaPricingKey.model} / ${duplicateBananaPricingKey.imageSize.toUpperCase()}.`,
+      };
+    }
     return adminConsoleCatalogStore.updateAsync((catalog) => ({
       ...catalog,
       imagePricingMatrix: body.rows,
+      ...(body.bananaRows !== undefined ? { bananaImagePricingMatrix: body.bananaRows } : {}),
       chatCompletionsUnitPrice: Math.max(0, Number(body.chatCompletionsUnitPrice ?? catalog.chatCompletionsUnitPrice ?? 0)),
       ...(body.chatCompletionsUnitPriceYuan !== undefined
         ? { chatCompletionsUnitPriceYuan: Math.max(0, Number(body.chatCompletionsUnitPriceYuan)) }
@@ -2971,6 +3018,9 @@ function matchProviderAdapter(provider: ProviderConfig, adapterKey: string) {
 }
 
 function mapUpstreamKindToProtocol(kind: ConsoleUpstream['kind']): ProviderConfig['protocol'] {
+  if (kind === 'banana_endpoint') {
+    return 'gemini_generate_content';
+  }
   if (kind === 'responses_endpoint') {
     return 'openai_responses';
   }
@@ -2984,6 +3034,7 @@ function toProviderConfig(upstream: ConsoleUpstream, policy?: ReturnType<typeof 
   const supportsImage = upstream.kind !== 'chat_completions';
   const protocol = mapUpstreamKindToProtocol(upstream.kind);
   const responsesConfig = upstream.responsesConfig;
+  const bananaConfig = upstream.bananaConfig;
   const enabled = upstream.enabled;
   return {
     providerId: upstream.id,
@@ -3007,16 +3058,24 @@ function toProviderConfig(upstream: ConsoleUpstream, policy?: ReturnType<typeof 
       supportsImageGeneration: upstream.kind === 'images_endpoint'
         ? Boolean(upstream.imagesConfig?.supportsGenerations)
         : upstream.kind === 'responses_endpoint',
+      // Banana is native image generation, not an OpenAI compatibility mode.
+      ...(upstream.kind === 'banana_endpoint' ? {
+        supportsImageGeneration: Boolean(bananaConfig?.supportsTextToImage),
+      } : {}),
       supportsImageEdit: upstream.kind === 'images_endpoint'
         ? Boolean(upstream.imagesConfig?.supportsEdits)
         : upstream.kind === 'responses_endpoint'
           ? Boolean(upstream.responsesConfig?.supportsImageInput)
-          : false,
+          : upstream.kind === 'banana_endpoint'
+            ? Boolean(bananaConfig?.supportsImageToImage)
+            : false,
       supportsReferenceImages:
         upstream.kind === 'images_endpoint'
           ? Boolean(upstream.imagesConfig?.supportsEdits)
           : upstream.kind === 'responses_endpoint'
             ? Boolean(upstream.responsesConfig?.supportsImageInput)
+            : upstream.kind === 'banana_endpoint'
+              ? Boolean(bananaConfig?.modelCapabilities.some((item) => item.supportsReferenceImages))
             : Boolean(upstream.chatConfig?.supportsVisionInput),
     },
     passthrough: upstream.passthrough,
@@ -3063,6 +3122,13 @@ function toProviderConfig(upstream: ConsoleUpstream, policy?: ReturnType<typeof 
         images_async_edits_url: upstream.imagesConfig.asyncEditsUrl || '',
         images_async_result_url_template: upstream.imagesConfig.asyncResultUrlTemplate || '',
       } : {}),
+      ...(upstream.kind === 'banana_endpoint' && bananaConfig ? {
+        banana_auth_mode: bananaConfig.authMode,
+        banana_supports_text_to_image: bananaConfig.supportsTextToImage,
+        banana_supports_image_to_image: bananaConfig.supportsImageToImage,
+        banana_generation_path_prefix: bananaConfig.generationPathPrefix || '/v1beta/models',
+        banana_model_capabilities: bananaConfig.modelCapabilities,
+      } : {}),
     },
   };
 }
@@ -3081,7 +3147,7 @@ async function syncCatalogUpstreamsToProviders(catalog: ReturnType<typeof adminC
       if (upstream.kind === 'chat_completions') {
         return textChannel ? textChannelUpstreamIds.has(upstream.id) : true;
       }
-      if (upstream.kind === 'images_endpoint' || upstream.kind === 'responses_endpoint') {
+      if (upstream.kind === 'images_endpoint' || upstream.kind === 'responses_endpoint' || upstream.kind === 'banana_endpoint') {
         return imageChannel ? imageChannelUpstreamIds.has(upstream.id) : true;
       }
       return false;
@@ -3125,6 +3191,22 @@ async function buildUpstreamTestRequestPlan(upstream: ConsoleUpstream, input: z.
         : 'generations',
       adapted,
     );
+  }
+
+  if (upstream.kind === 'banana_endpoint') {
+    const imageSize = String(input.size || '1k').trim().toLowerCase();
+    const provider = toProviderConfig(upstream);
+    return buildBananaRequestPlan(provider, {
+      model: input.model,
+      prompt: input.prompt,
+      size: imageSize,
+      image: input.referenceImageUrl,
+      extra_body: {
+        banana_protocol: true,
+        banana_image_size: imageSize,
+        banana_aspect_ratio: '1:1',
+      },
+    });
   }
 
   const headers: Record<string, string> = {

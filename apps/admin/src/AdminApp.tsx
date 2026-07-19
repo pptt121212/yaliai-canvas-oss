@@ -399,7 +399,7 @@ export function AdminApp() {
         <ImagePricingPage
           catalog={catalog}
           saving={saving}
-          onSave={(rows, chatCompletionsUnitPriceYuan) => wrapSave(() => saveImagePricing(rows, chatCompletionsUnitPriceYuan), '售价配置已保存')}
+          onSave={(rows, bananaRows, chatCompletionsUnitPriceYuan) => wrapSave(() => saveImagePricing(rows, bananaRows, chatCompletionsUnitPriceYuan), '售价配置已保存')}
         />
       );
     }

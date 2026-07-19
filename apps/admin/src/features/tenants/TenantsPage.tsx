@@ -61,6 +61,9 @@ type ApiKeyFormValues = {
   fixedImageProviderIds: string[];
   fixedImageFlatPrice: number;
   maxImageQuality: 'auto' | 'low' | 'medium' | 'high';
+  downstreamImageApiType: 'openai_images' | 'banana_images';
+  bananaAllowedModels: string[];
+  bananaAllowedImageSizes: Array<'1k' | '2k' | '4k'>;
   maskedKey: string;
   rawKey: string;
   keyHash: string;
@@ -105,6 +108,9 @@ function createApiKeyDefaults(secret?: { raw: string; masked: string; hash: stri
     fixedImageProviderIds: [],
     fixedImageFlatPrice: 0,
     maxImageQuality: 'high',
+    downstreamImageApiType: 'openai_images',
+    bananaAllowedModels: [],
+    bananaAllowedImageSizes: [],
     maskedKey: secret?.masked || '',
     rawKey: secret?.raw || '',
     keyHash: secret?.hash || '',
@@ -140,6 +146,9 @@ function apiKeyToForm(apiKey: ConsoleApiKey): ApiKeyFormValues {
     ].map((item) => String(item || '').trim()).filter(Boolean))),
     fixedImageFlatPrice: Math.max(0, Number(apiKey.fixedImageFlatPrice || 0)),
     maxImageQuality: apiKey.maxImageQuality || 'high',
+    downstreamImageApiType: apiKey.downstreamImageApiType || 'openai_images',
+    bananaAllowedModels: apiKey.bananaAllowedModels || [],
+    bananaAllowedImageSizes: apiKey.bananaAllowedImageSizes || [],
     maskedKey: apiKey.maskedKey,
     rawKey: apiKey.rawKey || '',
     keyHash: apiKey.keyHash || '',
@@ -259,16 +268,21 @@ export function TenantsPage({
   const rows = useMemo(() => buildTenantRows(catalog, canvasUsersReport), [catalog, canvasUsersReport]);
   const selectedTenantRow = rows.find((item) => item.tenant.id === selectedTenantId) || null;
   const editingApiKey = selectedTenantRow?.apiKeys.find((item) => item.id === editingApiKeyId) || null;
+  const watchedImageRoutingMode = Form.useWatch('imageRoutingMode', apiKeyForm);
+  const watchedDownstreamImageApiType = Form.useWatch('downstreamImageApiType', apiKeyForm);
+  const watchedFixedImageProviderIds = Form.useWatch('fixedImageProviderIds', apiKeyForm);
   const channelOptions = (catalog?.channels || []).map((item) => ({ value: item.id, label: item.name }));
   const imageChannel = (catalog?.channels || []).find((item) => item.id === 'channel_image_generation');
   const imageChannelUpstreamIds = new Set(imageChannel?.upstreamIds || []);
   const fixedImageProviderOptions = (catalog?.upstreams || [])
     .filter((item) => imageChannelUpstreamIds.has(item.id))
-    .filter((item) => item.kind === 'images_endpoint' || item.kind === 'responses_endpoint')
+    .filter((item) => watchedDownstreamImageApiType === 'banana_images'
+      ? item.kind === 'banana_endpoint'
+      : item.kind === 'images_endpoint' || item.kind === 'responses_endpoint')
     .map((item) => ({ value: item.id, label: `${item.name}（${item.id}）` }));
+  const bananaModelOptions = Array.from(new Set((catalog?.bananaImagePricingMatrix || []).map((item) => item.model)))
+    .map((model) => ({ value: model, label: model }));
   const endpoints = apiEndpoints();
-  const watchedImageRoutingMode = Form.useWatch('imageRoutingMode', apiKeyForm);
-  const watchedFixedImageProviderIds = Form.useWatch('fixedImageProviderIds', apiKeyForm);
 
   useEffect(() => {
     if (!tenantDrawerOpen) {
@@ -282,6 +296,15 @@ export function TenantsPage({
       tenantForm.setFieldsValue(createTenantDefaults());
     }
   }, [isCreatingTenant, selectedTenantRow, tenantDrawerOpen, tenantForm]);
+
+  useEffect(() => {
+    const selected = apiKeyForm.getFieldValue('fixedImageProviderIds') || [];
+    const allowed = new Set(fixedImageProviderOptions.map((item) => item.value));
+    const filtered = selected.filter((id: string) => allowed.has(id));
+    if (filtered.length !== selected.length) {
+      apiKeyForm.setFieldValue('fixedImageProviderIds', filtered);
+    }
+  }, [apiKeyForm, watchedDownstreamImageApiType, catalog]);
 
   async function copyText(text: string, successText: string) {
     await navigator.clipboard.writeText(text);
@@ -384,6 +407,13 @@ export function TenantsPage({
         ? Math.max(0, Number(values.fixedImageFlatPrice || 0))
         : 0,
       maxImageQuality: values.maxImageQuality || 'high',
+      downstreamImageApiType: values.downstreamImageApiType || 'openai_images',
+      bananaAllowedModels: values.downstreamImageApiType === 'banana_images'
+        ? Array.from(new Set((values.bananaAllowedModels || []).map((item) => String(item || '').trim()).filter(Boolean)))
+        : [],
+      bananaAllowedImageSizes: values.downstreamImageApiType === 'banana_images'
+        ? Array.from(new Set((values.bananaAllowedImageSizes || []).filter((item) => item === '1k' || item === '2k' || item === '4k')))
+        : [],
       maskedKey: values.maskedKey,
       rawKey: values.rawKey || currentRawKey || '',
       keyHash: values.keyHash,
@@ -625,7 +655,18 @@ export function TenantsPage({
                       },
                       { title: '每分钟限流', width: 105, align: 'right', render: (_, record) => <span className="tabular">{record.requestLimitPerMinute}</span> },
                       { title: '最大并发', width: 90, align: 'right', render: (_, record) => <span className="tabular">{record.maxConcurrency}</span> },
-                      { title: '画质上限', width: 100, render: (_, record) => <Text>{imageQualityCapLabel(record.maxImageQuality)}</Text> },
+                      {
+                        title: '接口类型',
+                        width: 130,
+                        render: (_, record) => <Text>{record.downstreamImageApiType === 'banana_images' ? 'Banana 图像' : 'OpenAI Images'}</Text>,
+                      },
+                      {
+                        title: '接口约束',
+                        width: 150,
+                        render: (_, record) => record.downstreamImageApiType === 'banana_images'
+                          ? <Text>{record.bananaAllowedModels?.length ? `${record.bananaAllowedModels.length} 个模型 / ${(record.bananaAllowedImageSizes || []).map((item) => item.toUpperCase()).join('、') || '全部几K'}` : '未限制模型'}</Text>
+                          : <Text>{imageQualityCapLabel(record.maxImageQuality)}</Text>,
+                      },
                       {
                         title: '路由模式',
                         width: 170,
@@ -848,12 +889,46 @@ export function TenantsPage({
               </Form.Item>
 
               <Form.Item
+                name="downstreamImageApiType"
+                label="下游图像接口类型"
+                extra="历史 API Key 默认归属 OpenAI Images。Banana Key 只可调用其原生图像接口，并使用模型和几K约束。"
+              >
+                <Select options={[
+                  { value: 'openai_images', label: 'OpenAI Images' },
+                  { value: 'banana_images', label: 'Banana 图像' },
+                ]} />
+              </Form.Item>
+
+              {watchedDownstreamImageApiType === 'banana_images' ? (
+                <>
+                  <Form.Item
+                    name="bananaAllowedModels"
+                    label="允许的 Banana 模型"
+                    extra="留空表示该 Key 可使用已配置售价的所有 Banana 模型；填写后只允许所选模型。"
+                  >
+                    <Select mode="multiple" allowClear options={bananaModelOptions} placeholder="选择已配置售价的 Banana 模型" />
+                  </Form.Item>
+                  <Form.Item
+                    name="bananaAllowedImageSizes"
+                    label="允许的 Banana 输出档位"
+                    extra="留空表示不额外限制；Banana 直接按提交给上游的 imageSize（几K）计价。"
+                  >
+                    <Select mode="multiple" allowClear options={[
+                      { value: '1k', label: '1K' },
+                      { value: '2k', label: '2K' },
+                      { value: '4k', label: '4K' },
+                    ]} />
+                  </Form.Item>
+                </>
+              ) : null}
+
+              {watchedDownstreamImageApiType !== 'banana_images' ? <Form.Item
                 name="maxImageQuality"
                 label="画质上限"
                 extra="仅将明确高于上限的画质降级；未填写画质仍由上游线路默认值决定，auto 不会被提升。"
               >
                 <Select options={imageQualityCapOptions} />
-              </Form.Item>
+              </Form.Item> : null}
 
               <Form.Item
                 name="imageRoutingMode"

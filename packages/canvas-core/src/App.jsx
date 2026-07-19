@@ -1747,6 +1747,9 @@ export default function App() {
             maskedKey: String(item?.maskedKey || '').trim(),
             rawKey: String(item?.rawKey || '').trim(),
             isDefault: Boolean(item?.isDefault),
+            downstreamImageApiType: String(item?.downstreamImageApiType || 'openai_images').trim(),
+            bananaAllowedModels: Array.isArray(item?.bananaAllowedModels) ? item.bananaAllowedModels.map((value) => String(value || '').trim()).filter(Boolean) : [],
+            bananaAllowedImageSizes: Array.isArray(item?.bananaAllowedImageSizes) ? item.bananaAllowedImageSizes.map((value) => String(value || '').trim()).filter(Boolean) : [],
             imagePricingMode: String(item?.imagePricingMode || 'pricing_matrix').trim(),
             fixedImageFlatPrice: Math.max(0, Number(item?.fixedImageFlatPrice || 0)),
           })).filter((item) => item.id)
@@ -4995,6 +4998,9 @@ export default function App() {
                             const imagePricingLabel = apiKey.imagePricingMode === 'fixed_flat' && fixedImageFlatPrice > 0
                               ? `图像 ${formatFinanceAmountYuan(fixedImageFlatPrice)} / 张`
                               : '图像按价格表';
+                            const imageApiTypeLabel = apiKey.downstreamImageApiType === 'banana_images'
+                              ? `Banana 图像${apiKey.bananaAllowedModels?.length ? `：${apiKey.bananaAllowedModels.join('、')}` : ''}${apiKey.bananaAllowedImageSizes?.length ? ` / ${apiKey.bananaAllowedImageSizes.map((item) => item.toUpperCase()).join('、')}` : ''}`
+                              : 'OpenAI Images';
                             return (
                               <article key={apiKey.id} className={`canvas-user-key-item ${apiKey.isDefault ? 'is-default' : ''}`}>
                                 <div className="canvas-user-key-item-head">
@@ -5004,6 +5010,7 @@ export default function App() {
                                   </div>
                                   <div className="canvas-user-key-badges">
                                     <em className="is-billing">{imagePricingLabel}</em>
+                                    <em>{imageApiTypeLabel}</em>
                                     {apiKey.isDefault ? <b>画布默认</b> : null}
                                     <em className={apiKey.status === 'active' ? 'is-active' : ''}>{apiKey.status === 'active' ? '可用' : '已停用'}</em>
                                   </div>

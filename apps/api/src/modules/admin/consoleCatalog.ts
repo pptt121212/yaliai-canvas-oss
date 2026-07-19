@@ -12,7 +12,7 @@ import { hasDatabaseUrl, requireDatabaseUrl } from '../storage/storageMode.js';
 
 requireDatabaseUrl('console_catalog');
 
-export type ConsoleUpstreamKind = 'images_endpoint' | 'responses_endpoint' | 'chat_completions';
+export type ConsoleUpstreamKind = 'images_endpoint' | 'responses_endpoint' | 'banana_endpoint' | 'chat_completions';
 export type ConsoleHealthStatus = 'healthy' | 'cooling' | 'degraded' | 'disabled';
 export type ResponseFormat = 'url' | 'b64_json';
 export type OutputImageFormat = 'png' | 'webp' | 'jpeg';
@@ -28,6 +28,7 @@ export type ImageToolQuality = 'auto' | 'low' | 'medium' | 'high';
 export type ImageQualityTier = 'auto' | 'low' | 'medium' | 'high';
 export type ImageQualityCap = 'auto' | 'low' | 'medium' | 'high';
 export type ImageCapabilityCostMap = Partial<Record<ImageQualityTier, number>>;
+export type BananaAuthMode = 'x_goog_api_key' | 'bearer' | 'both';
 
 export type UpstreamTestPreset = {
   operation: 'generations' | 'edits' | 'responses' | 'chat_completions';
@@ -116,6 +117,35 @@ export type ImageSellPriceRow = {
   price: number;
 };
 
+export type BananaImageSize = '1k' | '2k' | '4k';
+export type DownstreamImageApiType = 'openai_images' | 'banana_images';
+
+// Banana/Gemini image pricing is model-specific. Aspect ratio is a capability
+// constraint and audit value, not a price dimension.
+export type BananaImageSellPriceRow = {
+  model: string;
+  imageSize: BananaImageSize;
+  price: number;
+};
+
+// Banana uses Gemini generateContent semantics. Model and imageSize are both
+// hard capability and cost dimensions; aspect ratio is only a capability.
+export type BananaModelCapability = {
+  model: string;
+  imageSizes: BananaImageSize[];
+  aspectRatios: string[];
+  supportsReferenceImages: boolean;
+  costs?: Partial<Record<BananaImageSize, number>>;
+};
+
+export type BananaEndpointConfig = {
+  authMode: BananaAuthMode;
+  supportsTextToImage: boolean;
+  supportsImageToImage: boolean;
+  generationPathPrefix?: string;
+  modelCapabilities: BananaModelCapability[];
+};
+
 export type ImagesEndpointConfig = {
   supportsGenerations: boolean;
   supportsEdits: boolean;
@@ -182,11 +212,13 @@ export type ConsoleUpstream = {
   };
   imagesConfig?: ImagesEndpointConfig;
   responsesConfig?: ResponsesEndpointConfig;
+  bananaConfig?: BananaEndpointConfig;
   chatConfig?: ChatCompletionsConfig;
   detectedConfig?: {
     kind: ConsoleUpstreamKind;
     imagesConfig?: ImagesEndpointConfig;
     responsesConfig?: ResponsesEndpointConfig;
+    bananaConfig?: BananaEndpointConfig;
     chatConfig?: ChatCompletionsConfig;
     probe: OnboardingProbeResult;
   };
@@ -194,6 +226,7 @@ export type ConsoleUpstream = {
     kind?: ConsoleUpstreamKind;
     imagesConfig?: Partial<ImagesEndpointConfig>;
     responsesConfig?: Partial<ResponsesEndpointConfig>;
+    bananaConfig?: Partial<BananaEndpointConfig>;
     chatConfig?: Partial<ChatCompletionsConfig>;
     modelHints?: string[];
   };
@@ -248,6 +281,9 @@ export type ConsoleApiKey = {
   fixedImageProviderIds?: string[];
   fixedImageFlatPrice?: number;
   maxImageQuality?: ImageQualityCap;
+  downstreamImageApiType?: DownstreamImageApiType;
+  bananaAllowedModels?: string[];
+  bananaAllowedImageSizes?: BananaImageSize[];
   maskedKey: string;
   rawKey?: string;
   keyHash?: string;
@@ -268,6 +304,7 @@ export type AdminConsoleCatalog = {
   tenants: ConsoleTenant[];
   apiKeys: ConsoleApiKey[];
   imagePricingMatrix: ImageSellPriceRow[];
+  bananaImagePricingMatrix: BananaImageSellPriceRow[];
   chatCompletionsUnitPrice: number;
   chatCompletionsUnitPriceYuan?: number;
   systemPolicy: ConsoleSystemPolicy;
@@ -536,6 +573,79 @@ function defaultImageCapabilityProfiles(): ImageCapabilityProfile[] {
   }));
 }
 
+function defaultBananaConfig(): BananaEndpointConfig {
+  return {
+    authMode: 'x_goog_api_key',
+    supportsTextToImage: true,
+    supportsImageToImage: true,
+    generationPathPrefix: '/v1beta/models',
+    modelCapabilities: [],
+  };
+}
+
+function normalizeBananaImageSizes(input: unknown): BananaImageSize[] {
+  const source = Array.isArray(input) ? input : [];
+  const order: BananaImageSize[] = ['1k', '2k', '4k'];
+  const allowed = new Set(source.filter((item): item is BananaImageSize => (
+    item === '1k' || item === '2k' || item === '4k'
+  )));
+  return order.filter((item) => allowed.has(item));
+}
+
+function normalizeBananaModelCapabilities(input: unknown): BananaModelCapability[] {
+  const source = Array.isArray(input) ? input : [];
+  const byModel = new Map<string, BananaModelCapability>();
+  for (const item of source) {
+    if (!item || typeof item !== 'object') {
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    const model = String(record.model || '').trim();
+    if (!model) {
+      continue;
+    }
+    const costs: Partial<Record<BananaImageSize, number>> = {};
+    const rawCosts = record.costs && typeof record.costs === 'object'
+      ? record.costs as Record<string, unknown>
+      : {};
+    for (const imageSize of ['1k', '2k', '4k'] as const) {
+      const value = Number(rawCosts[imageSize] || 0);
+      if (Number.isFinite(value) && value >= 0) {
+        costs[imageSize] = value;
+      }
+    }
+    byModel.set(model, {
+      model,
+      imageSizes: normalizeBananaImageSizes(record.imageSizes),
+      aspectRatios: Array.from(new Set(
+        (Array.isArray(record.aspectRatios) ? record.aspectRatios : [])
+          .map((value) => String(value || '').trim())
+          .filter(Boolean),
+      )),
+      supportsReferenceImages: record.supportsReferenceImages === true,
+      costs,
+    });
+  }
+  return Array.from(byModel.values()).sort((left, right) => left.model.localeCompare(right.model));
+}
+
+function normalizeBananaConfig(input?: Partial<BananaEndpointConfig> | null): BananaEndpointConfig {
+  const defaults = defaultBananaConfig();
+  const authMode = input?.authMode === 'bearer' || input?.authMode === 'both'
+    ? input.authMode
+    : 'x_goog_api_key';
+  const generationPathPrefix = String(input?.generationPathPrefix || defaults.generationPathPrefix || '').trim();
+  return {
+    ...defaults,
+    ...(input || {}),
+    authMode,
+    generationPathPrefix: generationPathPrefix || defaults.generationPathPrefix,
+    supportsTextToImage: input?.supportsTextToImage !== false,
+    supportsImageToImage: input?.supportsImageToImage !== false,
+    modelCapabilities: normalizeBananaModelCapabilities(input?.modelCapabilities),
+  };
+}
+
 function normalizeImageToolQualityValue(value: unknown): ImageToolQuality | undefined {
   const normalized = String(value || '').trim();
   if (normalized === 'auto' || normalized === 'low' || normalized === 'medium' || normalized === 'high') {
@@ -632,6 +742,15 @@ function normalizeImagePricingMatrix(input?: unknown): ImageSellPriceRow[] {
 }
 
 function defaultTestPreset(kind: ConsoleUpstreamKind): UpstreamTestPreset {
+  if (kind === 'banana_endpoint') {
+    return {
+      operation: 'generations',
+      model: 'gemini-2.5-flash-image',
+      prompt: DEFAULT_TEST_PROMPT,
+      size: '1K',
+      referenceImageUrl: DEFAULT_TEST_REFERENCE_IMAGE_URL,
+    };
+  }
   if (kind === 'responses_endpoint') {
     return {
       operation: 'responses',
@@ -817,6 +936,26 @@ function normalizeOptionalEndpointUrl(value: unknown) {
   return /^https?:\/\//i.test(normalized) ? normalized : undefined;
 }
 
+function normalizeBananaImagePricingMatrix(input?: unknown): BananaImageSellPriceRow[] {
+  const source = Array.isArray(input) ? input : [];
+  const byKey = new Map<string, BananaImageSellPriceRow>();
+  for (const item of source) {
+    if (!item || typeof item !== 'object') continue;
+    const record = item as Record<string, unknown>;
+    const model = String(record.model || '').trim();
+    const imageSize = String(record.imageSize || '').trim().toLowerCase();
+    if (!model || (imageSize !== '1k' && imageSize !== '2k' && imageSize !== '4k')) continue;
+    byKey.set(`${model}:${imageSize}`, {
+      model,
+      imageSize,
+      price: Math.max(0, Number(record.price || 0)),
+    });
+  }
+  return Array.from(byKey.values()).sort((left, right) => (
+    left.model.localeCompare(right.model) || left.imageSize.localeCompare(right.imageSize)
+  ));
+}
+
 function normalizeProbeBaseCandidates(input: string) {
   const raw = normalizeBaseUrl(input);
   if (!raw) {
@@ -848,6 +987,9 @@ function mergeProbeBody(base: Record<string, unknown>, extra?: Record<string, un
 
 
 function inferKindFromProtocol(protocol: string | undefined): ConsoleUpstreamKind {
+  if (protocol === 'gemini_generate_content') {
+    return 'banana_endpoint';
+  }
   if (protocol === 'openai_responses') {
     return 'responses_endpoint';
   }
@@ -869,6 +1011,12 @@ function inferDetectedConfigFromProtocol(protocol: string | undefined) {
     return {
       kind,
       chatConfig: defaultChatConfig(),
+    };
+  }
+  if (kind === 'banana_endpoint') {
+    return {
+      kind,
+      bananaConfig: defaultBananaConfig(),
     };
   }
   return {
@@ -1067,6 +1215,9 @@ function normalizeDetectedConfigForKind(
     responsesConfig: kind === 'responses_endpoint'
       ? normalizeResponsesConfig(detectedConfig.responsesConfig)
       : undefined,
+    bananaConfig: kind === 'banana_endpoint'
+      ? normalizeBananaConfig(detectedConfig.bananaConfig)
+      : undefined,
     chatConfig: kind === 'chat_completions'
       ? normalizeChatConfig(detectedConfig.chatConfig)
       : undefined,
@@ -1086,6 +1237,7 @@ function normalizeManualOverridesForKind(
     kind,
     imagesConfig: kind === 'images_endpoint' ? manualOverrides.imagesConfig : undefined,
     responsesConfig: kind === 'responses_endpoint' ? manualOverrides.responsesConfig : undefined,
+    bananaConfig: kind === 'banana_endpoint' ? manualOverrides.bananaConfig : undefined,
     chatConfig: kind === 'chat_completions' ? manualOverrides.chatConfig : undefined,
     modelHints: manualOverrides.modelHints,
   };
@@ -1110,6 +1262,9 @@ function normalizeUpstreamForKind(input: ConsoleUpstream): ConsoleUpstream {
       : undefined,
     responsesConfig: kind === 'responses_endpoint'
       ? normalizeResponsesConfig(input.responsesConfig)
+      : undefined,
+    bananaConfig: kind === 'banana_endpoint'
+      ? normalizeBananaConfig(input.bananaConfig)
       : undefined,
     chatConfig: kind === 'chat_completions'
       ? normalizeChatConfig(input.chatConfig)
@@ -1192,7 +1347,7 @@ function imagesConfigFromProvider(provider: { metadata?: Record<string, unknown>
 
 function buildFixedChannels(upstreams: ConsoleUpstream[]): ConsoleChannel[] {
   const imageUpstreamIds = upstreams
-    .filter((item) => item.kind === 'images_endpoint' || item.kind === 'responses_endpoint')
+    .filter((item) => item.kind === 'images_endpoint' || item.kind === 'responses_endpoint' || item.kind === 'banana_endpoint')
     .map((item) => item.id);
   const textUpstreamIds = upstreams
     .filter((item) => item.kind === 'chat_completions')
@@ -1203,7 +1358,7 @@ function buildFixedChannels(upstreams: ConsoleUpstream[]): ConsoleChannel[] {
       id: 'channel_image_generation',
       name: '图像生成',
       businessType: 'image_generation',
-      acceptedUpstreamKinds: ['images_endpoint', 'responses_endpoint'],
+      acceptedUpstreamKinds: ['images_endpoint', 'responses_endpoint', 'banana_endpoint'],
       upstreamIds: imageUpstreamIds,
       upstreamPolicies: imageUpstreamIds.map((upstreamId) => buildDefaultChannelPolicy(upstreamId, upstreams)),
       enabled: true,
@@ -1438,6 +1593,7 @@ function deriveSeedCatalog(): AdminConsoleCatalog {
     tenants: [],
     apiKeys: [],
     imagePricingMatrix: defaultImagePricingMatrix(),
+    bananaImagePricingMatrix: [],
     chatCompletionsUnitPrice: 0,
     chatCompletionsUnitPriceYuan: 0,
     systemPolicy: defaultSystemPolicy(),
@@ -1473,7 +1629,7 @@ function normalizeCatalog(raw: unknown): AdminConsoleCatalog {
     }
     const record = item as Record<string, unknown>;
     const kind = String(record.kind || '');
-    if (kind !== 'images_endpoint' && kind !== 'responses_endpoint' && kind !== 'chat_completions') {
+    if (kind !== 'images_endpoint' && kind !== 'responses_endpoint' && kind !== 'banana_endpoint' && kind !== 'chat_completions') {
       return [];
     }
 
@@ -1499,6 +1655,9 @@ function normalizeCatalog(raw: unknown): AdminConsoleCatalog {
         : undefined,
       responsesConfig: kind === 'responses_endpoint'
         ? normalizeResponsesConfig(record.responsesConfig as Partial<ResponsesEndpointConfig> | undefined)
+        : undefined,
+      bananaConfig: kind === 'banana_endpoint'
+        ? normalizeBananaConfig(record.bananaConfig as Partial<BananaEndpointConfig> | undefined)
         : undefined,
       chatConfig: kind === 'chat_completions'
         ? normalizeChatConfig(record.chatConfig as Partial<ChatCompletionsConfig> | undefined)
@@ -1548,6 +1707,14 @@ function normalizeCatalog(raw: unknown): AdminConsoleCatalog {
       fixedImageProviderIds,
       fixedImageFlatPrice: Math.max(0, Number(item.fixedImageFlatPrice || 0)),
       maxImageQuality: normalizeImageQualityCap(item.maxImageQuality),
+      // Historical API keys were all issued for the OpenAI Images contract.
+      downstreamImageApiType: item.downstreamImageApiType === 'banana_images' ? 'banana_images' : 'openai_images',
+      bananaAllowedModels: Array.isArray(item.bananaAllowedModels)
+        ? Array.from(new Set(item.bananaAllowedModels.map((value) => String(value || '').trim()).filter(Boolean)))
+        : [],
+      bananaAllowedImageSizes: Array.isArray(item.bananaAllowedImageSizes)
+        ? Array.from(new Set(item.bananaAllowedImageSizes.filter((value): value is BananaImageSize => value === '1k' || value === '2k' || value === '4k')))
+        : [],
       maskedKey: String(item.maskedKey || ''),
       rawKey: String(item.rawKey || ''),
       keyHash: String(item.keyHash || ''),
@@ -1555,6 +1722,7 @@ function normalizeCatalog(raw: unknown): AdminConsoleCatalog {
       };
     }),
     imagePricingMatrix: normalizeImagePricingMatrix(source.imagePricingMatrix),
+    bananaImagePricingMatrix: normalizeBananaImagePricingMatrix(source.bananaImagePricingMatrix),
     chatCompletionsUnitPrice: Math.max(0, Number(source.chatCompletionsUnitPrice || 0)),
     ...(Number.isFinite(Number(source.chatCompletionsUnitPriceYuan))
       ? { chatCompletionsUnitPriceYuan: Math.max(0, Number(source.chatCompletionsUnitPriceYuan)) }
@@ -1947,12 +2115,34 @@ function buildProbeCandidates(baseCandidate: string, input: ProbeBuilderInput): 
       ? 'gpt-4.1-mini'
       : targetKind === 'responses_endpoint'
         ? 'gpt-5.4-mini'
-        : 'gpt-image-2'
+        : targetKind === 'banana_endpoint'
+          ? 'gemini-2.5-flash-image'
+          : 'gpt-image-2'
   );
   const imageModel = input.imageModel || 'gpt-image-2';
   const size = input.size || '1536x1024';
   const referenceImageUrl = input.referenceImageUrl || DEFAULT_TEST_REFERENCE_IMAGE_URL;
   const customBodyFields = input.customBodyFields;
+
+  if (targetKind === 'banana_endpoint') {
+    const prompt = String(input.prompt || DEFAULT_TEST_PROMPT).trim() || DEFAULT_TEST_PROMPT;
+    const imageSize = String(input.size || '1K').trim().toUpperCase();
+    return [{
+      key: `banana_post:${baseCandidate}`,
+      label: 'Banana / Gemini generateContent POST',
+      method: 'POST',
+      baseUrl: baseCandidate,
+      path: `/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+      body: mergeProbeBody({
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: {
+          responseModalities: ['TEXT', 'IMAGE'],
+          imageConfig: { aspectRatio: '1:1', imageSize },
+        },
+      }, customBodyFields),
+      requireImageOutput: true,
+    }];
+  }
 
   if (targetKind === 'responses_endpoint') {
     const candidates: ProbeCandidate[] = [
@@ -2167,6 +2357,7 @@ function inferKindFromChecks(checks: EndpointProbeCheck[]): ConsoleUpstreamKind[
   const hasImages = checks.some((item) => item.key.includes('images_') && item.ok);
   const hasResponses = checks.some((item) => item.key.includes('responses_') && item.ok);
   const hasChat = checks.some((item) => item.key.includes('chat_') && item.exists);
+  const hasBanana = checks.some((item) => item.key.includes('banana_') && item.ok);
 
   if (hasImages) {
     result.push('images_endpoint');
@@ -2176,6 +2367,9 @@ function inferKindFromChecks(checks: EndpointProbeCheck[]): ConsoleUpstreamKind[
   }
   if (hasChat) {
     result.push('chat_completions');
+  }
+  if (hasBanana) {
+    result.push('banana_endpoint');
   }
 
   return result;
@@ -2387,6 +2581,17 @@ function buildDetectedUpstreamDraft(
         supportsVisionInput: Boolean(input.referenceImageUrl) && chatChecks.some((item) => item.key.includes('chat_post') && item.exists),
       }
     : undefined;
+  const bananaConfig = kind === 'banana_endpoint'
+    ? normalizeBananaConfig({
+        modelCapabilities: [{
+          model: preset.model,
+          imageSizes: ['1k', '2k', '4k'],
+          aspectRatios: ['1:1'],
+          supportsReferenceImages: false,
+          costs: {},
+        }],
+      })
+    : undefined;
 
   return {
     id: randomId('upstream'),
@@ -2409,11 +2614,13 @@ function buildDetectedUpstreamDraft(
     },
     imagesConfig,
     responsesConfig,
+    bananaConfig,
     chatConfig,
     detectedConfig: {
       kind,
       imagesConfig,
       responsesConfig,
+      bananaConfig,
       chatConfig,
       probe,
     },
@@ -3585,7 +3792,7 @@ export async function analyzeOnboardingInput(
         id: 'channel_image_generation',
         name: '图像生成',
         businessType: 'image_generation',
-        acceptedUpstreamKinds: ['images_endpoint', 'responses_endpoint'],
+        acceptedUpstreamKinds: ['images_endpoint', 'responses_endpoint', 'banana_endpoint'],
         upstreamIds: [],
         upstreamPolicies: [],
         enabled: true,
@@ -3789,6 +3996,9 @@ async function probeCandidate(candidate: ProbeCandidate, apiKey: string): Promis
     Authorization: `Bearer ${apiKey}`,
     Accept: candidate.key.startsWith('responses_post') && responsesStreamEnabled ? 'text/event-stream' : 'application/json',
   };
+  if (candidate.key.startsWith('banana_post')) {
+    requestHeaders['x-goog-api-key'] = apiKey;
+  }
   const maxAttempts = candidate.key.startsWith('responses_post') ? 3 : 1;
   let lastFailure: ProbeExecutionResult | null = null;
   try {
@@ -3823,6 +4033,13 @@ async function probeCandidate(candidate: ProbeCandidate, apiKey: string): Promis
         || looksLikeParameterCompatibilityError(responseText, responseJson);
       const semantic = candidate.key.startsWith('responses_post')
         ? evaluateResponsesImageProbeFromResult({ bodyText: responseText, bodyJson: responseJson })
+        : candidate.key.startsWith('banana_post')
+          ? {
+              ok: hasBananaInlineImage(responseJson),
+              reason: hasBananaInlineImage(responseJson)
+                ? '识别到 Banana inlineData 图像输出。'
+                : '收到响应，但未识别到 Banana inlineData 图像输出。',
+            }
         : candidate.requireImageOutput
           ? await evaluateImagesOutputProbe({
               bodyJson: responseJson,
@@ -3947,6 +4164,24 @@ function probeDetectImageExtensionFromBuffer(buffer: Buffer) {
     return 'webp';
   }
   return 'png';
+}
+
+function hasBananaInlineImage(value: unknown): boolean {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  if (Array.isArray(value)) {
+    return value.some((item) => hasBananaInlineImage(item));
+  }
+  const record = value as Record<string, unknown>;
+  const inlineData = record.inlineData || record.inline_data;
+  if (inlineData && typeof inlineData === 'object' && !Array.isArray(inlineData)) {
+    const inline = inlineData as Record<string, unknown>;
+    if (/^image\//i.test(String(inline.mimeType || inline.mime_type || '')) && String(inline.data || '').trim()) {
+      return true;
+    }
+  }
+  return Object.values(record).some((item) => hasBananaInlineImage(item));
 }
 
 function probeDetectKnownImageExtensionFromBuffer(buffer: Buffer) {

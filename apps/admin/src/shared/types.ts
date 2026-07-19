@@ -612,7 +612,7 @@ export type CanvasUserAdminReport = {
   rows: CanvasUserAdminRow[];
 };
 
-export type ConsoleUpstreamKind = 'images_endpoint' | 'responses_endpoint' | 'chat_completions';
+export type ConsoleUpstreamKind = 'images_endpoint' | 'responses_endpoint' | 'banana_endpoint' | 'chat_completions';
 export type ResolutionTier = 'auto' | '1k' | '2k' | '4k';
 export type BillableResolutionTier = 'auto' | '1k' | '2k' | '4k';
 export type ResponseFormat = 'url' | 'b64_json';
@@ -736,6 +736,31 @@ export type OnboardingProbeResult = {
   summary: string;
 };
 
+export type BananaImageSize = '1k' | '2k' | '4k';
+export type DownstreamImageApiType = 'openai_images' | 'banana_images';
+
+export type BananaImageSellPriceRow = {
+  model: string;
+  imageSize: BananaImageSize;
+  price: number;
+};
+
+export type BananaAuthMode = 'x_goog_api_key' | 'bearer' | 'both';
+export type BananaModelCapability = {
+  model: string;
+  imageSizes: BananaImageSize[];
+  aspectRatios: string[];
+  supportsReferenceImages: boolean;
+  costs?: Partial<Record<BananaImageSize, number>>;
+};
+export type BananaEndpointConfig = {
+  authMode: BananaAuthMode;
+  supportsTextToImage: boolean;
+  supportsImageToImage: boolean;
+  generationPathPrefix?: string;
+  modelCapabilities: BananaModelCapability[];
+};
+
 export type OnboardingProbeLogEntry = {
   key: string;
   title: string;
@@ -781,11 +806,13 @@ export type ConsoleUpstream = {
   passthrough?: ProviderPassthroughPolicy;
   imagesConfig?: ImagesEndpointConfig;
   responsesConfig?: ResponsesEndpointConfig;
+  bananaConfig?: BananaEndpointConfig;
   chatConfig?: ChatCompletionsConfig;
   detectedConfig?: {
     kind: ConsoleUpstreamKind;
     imagesConfig?: ImagesEndpointConfig;
     responsesConfig?: ResponsesEndpointConfig;
+    bananaConfig?: BananaEndpointConfig;
     chatConfig?: ChatCompletionsConfig;
     probe: OnboardingProbeResult;
   };
@@ -793,6 +820,7 @@ export type ConsoleUpstream = {
     kind?: ConsoleUpstreamKind;
     imagesConfig?: Partial<ImagesEndpointConfig>;
     responsesConfig?: Partial<ResponsesEndpointConfig>;
+    bananaConfig?: Partial<BananaEndpointConfig>;
     chatConfig?: Partial<ChatCompletionsConfig>;
     modelHints?: string[];
   };
@@ -888,6 +916,9 @@ export type ConsoleApiKey = {
   fixedImageProviderIds?: string[];
   fixedImageFlatPrice?: number;
   maxImageQuality?: ImageQualityCap;
+  downstreamImageApiType?: DownstreamImageApiType;
+  bananaAllowedModels?: string[];
+  bananaAllowedImageSizes?: BananaImageSize[];
   maskedKey: string;
   rawKey?: string;
   keyHash?: string;
@@ -908,6 +939,7 @@ export type AdminConsoleCatalog = {
   tenants: ConsoleTenant[];
   apiKeys: ConsoleApiKey[];
   imagePricingMatrix: ImageSellPriceRow[];
+  bananaImagePricingMatrix: BananaImageSellPriceRow[];
   chatCompletionsUnitPrice: number;
   chatCompletionsUnitPriceYuan?: number;
   systemPolicy: ConsoleSystemPolicy;
@@ -938,7 +970,7 @@ export type OnboardingAnalyzeRequest = {
   name: string;
   baseUrl?: string;
   apiKey?: string;
-  targetKind?: 'images_endpoint' | 'responses_endpoint' | 'chat_completions';
+  targetKind?: ConsoleUpstreamKind;
   model?: string;
   imageModel?: string;
   reasoningEffort?: ReasoningEffort;

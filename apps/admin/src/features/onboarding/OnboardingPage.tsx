@@ -24,8 +24,8 @@ type KeyValueItem = {
   value: string;
 };
 
-type OnboardingFormValues = OnboardingAnalyzeRequest & {
-  targetKind: 'images_endpoint' | 'responses_endpoint' | 'chat_completions';
+type OnboardingFormValues = Omit<OnboardingAnalyzeRequest, 'targetKind'> & {
+  targetKind: 'images_endpoint' | 'responses_endpoint' | 'banana_endpoint' | 'chat_completions';
   customBodyFieldsList?: KeyValueItem[];
 };
 
@@ -41,12 +41,14 @@ type OnboardingPageProps = {
 const kindLabelMap = {
   images_endpoint: 'Images Endpoint',
   responses_endpoint: 'Responses Endpoint',
+  banana_endpoint: 'Banana / Gemini 图像',
   chat_completions: 'Chat Completions',
 } as const;
 
 const targetKindOptions = [
   { value: 'images_endpoint', label: 'Images Endpoint：文生图 / 图生图' },
   { value: 'responses_endpoint', label: 'Responses Endpoint：图像工具链路' },
+  { value: 'banana_endpoint', label: 'Banana / Gemini 图像：generateContent' },
   { value: 'chat_completions', label: 'Chat Completions：文本 / 视觉理解' },
 ];
 
@@ -133,6 +135,10 @@ const reservedCustomBodyFieldKeysByKind: Record<OnboardingFormValues['targetKind
     'tool_choice',
     'stream',
     'reasoning',
+  ]),
+  banana_endpoint: new Set([
+    'contents',
+    'generationConfig',
   ]),
   chat_completions: new Set([
     'model',

@@ -425,11 +425,107 @@ function buildChatRequestPlan(provider: ProviderConfig, request: OpenAIImagesReq
   };
 }
 
-export function buildImageRequestPlanForProvider(
+function geminiInlineDataFromValue(value: string) {
+  const decoded = decodeImagePayloadToBase64(value);
+  if (!decoded?.base64) {
+    return null;
+  }
+  return {
+    mimeType: contentTypeForExtension(decoded.extension),
+    data: decoded.base64,
+  };
+}
+
+async function geminiInlineDataFromReference(value: string) {
+  const raw = String(value || '').trim();
+  const decoded = geminiInlineDataFromValue(raw);
+  if (decoded) {
+    return decoded;
+  }
+  if (!isHttpUrl(raw)) {
+    return null;
+  }
+  const dataUrl = await fetchImageUrlAsDataUrl(raw);
+  return geminiInlineDataFromValue(dataUrl);
+}
+
+export function buildBananaGenerateContentUrl(provider: ProviderConfig, model: string) {
+  const base = String(provider.baseUrl || '').trim().replace(/\/+$/, '');
+  const prefix = String(provider.metadata?.banana_generation_path_prefix || '/v1beta/models')
+    .trim()
+    .replace(/^\/+|\/+$/g, '');
+  const encodedModel = encodeURIComponent(String(model || '').trim());
+  if (!base || !encodedModel) {
+    return base;
+  }
+  // An explicitly configured full model endpoint remains valid for proxy APIs.
+  if (/:generateContent(?:\?|$)/i.test(base)) {
+    return base;
+  }
+  const pathBase = base.endsWith(`/${prefix}`) ? base : `${base}/${prefix}`;
+  return `${pathBase}/${encodedModel}:generateContent`;
+}
+
+export async function buildBananaRequestPlan(provider: ProviderConfig, request: OpenAIImagesRequest): Promise<UpstreamRequestPlan> {
+  const imageSize = String(request.extra_body?.banana_image_size || request.size || '1K').trim().toUpperCase();
+  const aspectRatio = String(request.extra_body?.banana_aspect_ratio || '1:1').trim();
+  const references = request.image
+    ? (Array.isArray(request.image) ? request.image : [request.image])
+    : [];
+  const parts: Array<Record<string, unknown>> = [{ text: request.prompt }];
+  for (const reference of references) {
+    const inlineData = await geminiInlineDataFromReference(String(reference || ''));
+    if (!inlineData) {
+      throw new Error('Banana reference images must be a valid data URL, Base64 payload, or reachable HTTP URL.');
+    }
+    parts.push({ inlineData });
+  }
+
+  const authMode = String(provider.metadata?.banana_auth_mode || 'x_goog_api_key');
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+  };
+  if (provider.apiKey && (authMode === 'x_goog_api_key' || authMode === 'both')) {
+    headers['x-goog-api-key'] = provider.apiKey;
+  }
+  if (provider.apiKey && (authMode === 'bearer' || authMode === 'both')) {
+    headers.Authorization = `Bearer ${provider.apiKey}`;
+  }
+  if (provider.passthrough?.injectHeaders) {
+    Object.assign(headers, provider.passthrough.injectHeaders);
+  }
+  const body: Record<string, unknown> = {
+    contents: [{ role: 'user', parts }],
+    generationConfig: {
+      responseModalities: ['TEXT', 'IMAGE'],
+      imageConfig: {
+        aspectRatio,
+        imageSize,
+      },
+    },
+    ...sanitizeInjectedBodyFields(provider.passthrough?.injectBodyFields, new Set([
+      'contents',
+      'generationConfig',
+    ])),
+  };
+  return {
+    url: buildBananaGenerateContentUrl(provider, request.model),
+    method: 'POST',
+    headers,
+    body,
+    bodyFormat: 'json',
+  };
+}
+
+export async function buildImageRequestPlanForProvider(
   provider: ProviderConfig,
   operation: OpenAIImagesOperation,
   request: OpenAIImagesRequest,
-): UpstreamRequestPlan {
+): Promise<UpstreamRequestPlan> {
+  if (provider.protocol === 'gemini_generate_content') {
+    return buildBananaRequestPlan(provider, request);
+  }
   if (provider.protocol === 'openai_responses') {
     return buildResponsesRequestPlan(provider, request);
   }
@@ -509,6 +605,6 @@ export function resolveImageProviderPlan(input: ResolveImageProviderInput): Imag
   return {
     provider: selection.provider,
     selection,
-    requestPlan: buildImageRequestPlanForProvider(selection.provider, input.operation, input.request),
+    requestPlan: buildOpenAIImagesUpstreamRequest(selection.provider, input.operation, input.request),
   };
 }

@@ -30,6 +30,8 @@ import {
 import type { StatusTone } from '../../shared/ui';
 import type {
   AdminConsoleCatalog,
+  BananaAuthMode,
+  BananaModelCapability,
   ConsoleUpstream,
   ImageBackgroundMode,
   ImageCapabilityProfile,
@@ -139,11 +141,17 @@ type FormShape = {
   supportsTools?: boolean;
   supportsVisionInput?: boolean;
   chatUpstreamCostYuan?: number;
+  bananaAuthMode?: BananaAuthMode;
+  bananaSupportsTextToImage?: boolean;
+  bananaSupportsImageToImage?: boolean;
+  bananaGenerationPathPrefix?: string;
+  bananaModelCapabilities?: BananaModelCapability[];
 };
 
 const kindOptions = [
   { value: 'images_endpoint', label: 'Images Endpoint' },
   { value: 'responses_endpoint', label: 'Responses Endpoint' },
+  { value: 'banana_endpoint', label: 'Banana / Gemini 图像接口' },
   { value: 'chat_completions', label: 'Chat Completions' },
 ];
 
@@ -176,6 +184,9 @@ function displayUpstreamHost(value: string) {
 }
 
 function imageUploadFormats(upstream: ConsoleUpstream) {
+  if (upstream.kind === 'banana_endpoint') {
+    return upstream.bananaConfig?.supportsImageToImage ? 'BASE64' : '不支持';
+  }
   if (upstream.kind === 'images_endpoint') {
     if (!upstream.imagesConfig?.supportsEdits) {
       return '不支持';
@@ -200,6 +211,9 @@ function imageUploadFormats(upstream: ConsoleUpstream) {
 }
 
 function imageReturnFormats(upstream: ConsoleUpstream) {
+  if (upstream.kind === 'banana_endpoint') {
+    return 'BASE64';
+  }
   const formats = upstream.kind === 'images_endpoint'
     ? upstream.imagesConfig?.responseFormats || []
     : upstream.kind === 'responses_endpoint'
@@ -628,6 +642,10 @@ const reservedCustomBodyFieldKeysByKind: Record<ConsoleUpstream['kind'], Set<str
     'stream',
     'reasoning',
   ]),
+  banana_endpoint: new Set([
+    'contents',
+    'generationConfig',
+  ]),
   chat_completions: new Set([
     'model',
     'messages',
@@ -698,6 +716,13 @@ const emptyUpstream: ConsoleUpstream = {
     imageToolQuality: 'medium',
     imageQuality: undefined,
   },
+  bananaConfig: {
+    authMode: 'x_goog_api_key',
+    supportsTextToImage: true,
+    supportsImageToImage: true,
+    generationPathPrefix: '/v1beta/models',
+    modelCapabilities: [],
+  },
   chatConfig: {
     supportsSystemPrompt: true,
     supportsJsonMode: true,
@@ -707,6 +732,25 @@ const emptyUpstream: ConsoleUpstream = {
 };
 
 function protocolDefaults(kind: ConsoleUpstream['kind']): Partial<FormShape> {
+  if (kind === 'banana_endpoint') {
+    return {
+      modelHintsText: '',
+      maxConcurrency: 10,
+      injectHeadersList: [],
+      injectBodyFieldsList: [],
+      testOperation: 'generations',
+      testModel: '',
+      testPrompt: 'A clean studio product photograph of a small orange cat.',
+      testSize: '1k',
+      testReferenceImageUrl: localReferenceImageUrl,
+      testN: 1,
+      bananaAuthMode: 'x_goog_api_key',
+      bananaSupportsTextToImage: true,
+      bananaSupportsImageToImage: true,
+      bananaGenerationPathPrefix: '/v1beta/models',
+      bananaModelCapabilities: [],
+    };
+  }
   if (kind === 'responses_endpoint') {
     return {
       modelHintsText: 'gpt-image-2',
@@ -1134,6 +1178,11 @@ function toFormValues(upstream: ConsoleUpstream): FormShape {
     supportsTools: upstream.chatConfig?.supportsTools,
     supportsVisionInput: upstream.chatConfig?.supportsVisionInput,
     chatUpstreamCostYuan: upstream.chatConfig?.upstreamCostYuan,
+    bananaAuthMode: upstream.bananaConfig?.authMode || 'x_goog_api_key',
+    bananaSupportsTextToImage: upstream.bananaConfig?.supportsTextToImage ?? true,
+    bananaSupportsImageToImage: upstream.bananaConfig?.supportsImageToImage ?? true,
+    bananaGenerationPathPrefix: upstream.bananaConfig?.generationPathPrefix || '/v1beta/models',
+    bananaModelCapabilities: upstream.bananaConfig?.modelCapabilities || [],
   };
   return {
     ...protocolDefaults(upstream.kind),
@@ -1225,6 +1274,19 @@ function toUpstream(values: FormShape, original?: ConsoleUpstream | null): Conso
       moderationMode: values.responsesModerationMode || 'task_or_omit',
       imageToolQuality: values.responsesImageToolQuality ?? undefined,
       imageQuality: values.responsesImageQuality ?? undefined,
+    } : undefined,
+    bananaConfig: kind === 'banana_endpoint' ? {
+      authMode: values.bananaAuthMode || 'x_goog_api_key',
+      supportsTextToImage: values.bananaSupportsTextToImage !== false,
+      supportsImageToImage: values.bananaSupportsImageToImage !== false,
+      generationPathPrefix: values.bananaGenerationPathPrefix || '/v1beta/models',
+      modelCapabilities: (values.bananaModelCapabilities || []).map((item) => ({
+        model: String(item.model || '').trim(),
+        imageSizes: item.imageSizes || [],
+        aspectRatios: item.aspectRatios || [],
+        supportsReferenceImages: item.supportsReferenceImages === true,
+        costs: item.costs || {},
+      })).filter((item) => item.model),
     } : undefined,
     chatConfig: kind === 'chat_completions' ? {
       supportsSystemPrompt: Boolean(values.supportsSystemPrompt),
@@ -1997,6 +2059,57 @@ export function UpstreamsPage({ catalog, saving, onSave, onDelete, onTest }: Ups
                 >
                   <CapabilityProfilesEditor />
                 </Form.Item>
+              </Card>
+            </>
+          ) : null}
+
+          {currentKind === 'banana_endpoint' ? (
+            <>
+              <SectionTitle desc="Banana 使用 Gemini generateContent 原生协议。模型、K 档位和比例是路由硬条件；每个模型每个 K 档位单独配置成本。">
+                Banana / Gemini 图像配置
+              </SectionTitle>
+              <Card size="small" className="upstream-config-card">
+                <Row gutter={16}>
+                  <Col span={8}>
+                    <Form.Item name="bananaAuthMode" label="上游鉴权方式">
+                      <Select options={[
+                        { value: 'x_goog_api_key', label: 'x-goog-api-key' },
+                        { value: 'bearer', label: 'Bearer' },
+                        { value: 'both', label: '同时携带两者' },
+                      ]} />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}><Form.Item name="bananaSupportsTextToImage" label="支持文生图" valuePropName="checked"><Switch /></Form.Item></Col>
+                  <Col span={8}><Form.Item name="bananaSupportsImageToImage" label="支持图生图" valuePropName="checked"><Switch /></Form.Item></Col>
+                  <Col span={24}>
+                    <Form.Item name="bananaGenerationPathPrefix" label="生成接口路径前缀" extra="基础地址填写域名或网关根路径；系统将请求 /v1beta/models/{model}:generateContent。">
+                      <Input placeholder="/v1beta/models" />
+                    </Form.Item>
+                  </Col>
+                </Row>
+              </Card>
+              <Card size="small" title="模型能力与上游成本（元 / 张）" className="upstream-config-card" style={{ marginTop: 16 }}>
+                <Form.List name="bananaModelCapabilities">
+                  {(fields, { add, remove }) => (
+                    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                      {fields.map((field) => (
+                        <Card size="small" key={field.key}>
+                          <Row gutter={12}>
+                            <Col span={8}><Form.Item name={[field.name, 'model']} label="模型" rules={[{ required: true }]}><Input placeholder="例如 gemini-2.5-flash-image" /></Form.Item></Col>
+                            <Col span={8}><Form.Item name={[field.name, 'imageSizes']} label="支持图像尺寸"><Select mode="multiple" options={['1k', '2k', '4k'].map((value) => ({ value, label: value.toUpperCase() }))} /></Form.Item></Col>
+                            <Col span={8}><Form.Item name={[field.name, 'aspectRatios']} label="支持比例"><Select mode="tags" placeholder="例如 1:1、16:9" /></Form.Item></Col>
+                            <Col span={8}><Form.Item name={[field.name, 'supportsReferenceImages']} label="支持参考图" valuePropName="checked"><Switch /></Form.Item></Col>
+                            <Col span={5}><Form.Item name={[field.name, 'costs', '1k']} label="1K 成本"><InputNumber min={0} precision={5} step={0.00001} style={{ width: '100%' }} /></Form.Item></Col>
+                            <Col span={5}><Form.Item name={[field.name, 'costs', '2k']} label="2K 成本"><InputNumber min={0} precision={5} step={0.00001} style={{ width: '100%' }} /></Form.Item></Col>
+                            <Col span={5}><Form.Item name={[field.name, 'costs', '4k']} label="4K 成本"><InputNumber min={0} precision={5} step={0.00001} style={{ width: '100%' }} /></Form.Item></Col>
+                            <Col span={6} style={{ display: 'flex', alignItems: 'end' }}><Button danger onClick={() => remove(field.name)}>移除模型</Button></Col>
+                          </Row>
+                        </Card>
+                      ))}
+                      <Button type="dashed" icon={<PlusOutlined />} onClick={() => add({ imageSizes: ['1k'], aspectRatios: ['1:1'], supportsReferenceImages: false, costs: {} })}>新增模型能力</Button>
+                    </Space>
+                  )}
+                </Form.List>
               </Card>
             </>
           ) : null}
