@@ -741,7 +741,6 @@ export type DownstreamImageApiType = 'openai_images' | 'banana_images';
 
 export type BananaImageSellPriceRow = {
   model: string;
-  imageSize: BananaImageSize;
   price: number;
 };
 
@@ -751,7 +750,7 @@ export type BananaModelCapability = {
   imageSizes: BananaImageSize[];
   aspectRatios: string[];
   supportsReferenceImages: boolean;
-  costs?: Partial<Record<BananaImageSize, number>>;
+  cost?: number;
 };
 export type BananaEndpointConfig = {
   authMode: BananaAuthMode;

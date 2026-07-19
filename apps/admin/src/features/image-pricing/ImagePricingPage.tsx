@@ -1,9 +1,9 @@
-import { Alert, Button, Card, Input, InputNumber, Popconfirm, Space, Table, Tabs, Typography } from 'antd';
+import { Alert, Button, Card, InputNumber, Space, Table, Tabs, Typography } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
+import { BANANA_MODELS } from '@yali/provider-core';
 import type {
   AdminConsoleCatalog,
   BananaImageSellPriceRow,
-  BananaImageSize,
   BillableResolutionTier,
   ImageQualityTier,
   ImageSellPriceRow,
@@ -24,7 +24,6 @@ type ImagePricingPageProps = {
 
 const tierOrder: BillableResolutionTier[] = ['auto', '1k', '2k', '4k'];
 const qualityOrder: ImageQualityTier[] = ['auto', 'low', 'medium', 'high'];
-const bananaSizeOrder: BananaImageSize[] = ['1k', '2k', '4k'];
 
 function normalizeRows(rows?: ImageSellPriceRow[]) {
   const byKey = new Map((rows || []).map((row) => [row.tier + ':' + row.quality, row.price]));
@@ -36,13 +35,11 @@ function normalizeRows(rows?: ImageSellPriceRow[]) {
 }
 
 function normalizeBananaRows(rows?: BananaImageSellPriceRow[]) {
-  const byKey = new Map((rows || []).map((row) => [`${row.model}:${row.imageSize}`, Number(row.price || 0)]));
-  const models = Array.from(new Set((rows || []).map((row) => String(row.model || '').trim()).filter(Boolean))).sort();
-  return models.flatMap((model) => bananaSizeOrder.map((imageSize) => ({
-    model,
-    imageSize,
-    price: Number(byKey.get(`${model}:${imageSize}`) || 0),
-  })));
+  const byModel = new Map((rows || []).map((row) => [row.model, Number(row.price || 0)]));
+  return BANANA_MODELS.map((model) => ({
+    model: model.id,
+    price: Number(byModel.get(model.id) || 0),
+  }));
 }
 
 function qualityLabel(value: ImageQualityTier) {
@@ -59,7 +56,8 @@ function tierLabel(value: BillableResolutionTier) {
 type BananaPricingTableRow = {
   key: string;
   model: string;
-} & Record<BananaImageSize, number>;
+  price: number;
+};
 
 export function ImagePricingPage({ catalog, saving, onSave }: ImagePricingPageProps) {
   const [draftRows, setDraftRows] = useState<ImageSellPriceRow[]>([]);
@@ -86,7 +84,6 @@ export function ImagePricingPage({ catalog, saving, onSave }: ImagePricingPagePr
   const baselineChatPriceYuan = Number.isFinite(rawChatPriceYuan)
     ? Math.max(0, rawChatPriceYuan)
     : Math.max(0, Number(catalog?.chatCompletionsUnitPrice || 0)) / 100;
-  const hasInvalidBananaModel = draftBananaRows.some((row) => !String(row.model || '').trim());
   const isDirty = JSON.stringify(draftRows) !== JSON.stringify(baselineRows)
     || JSON.stringify(draftBananaRows) !== JSON.stringify(baselineBananaRows)
     || chatCompletionsUnitPriceYuan !== baselineChatPriceYuan;
@@ -99,36 +96,12 @@ export function ImagePricingPage({ catalog, saving, onSave }: ImagePricingPagePr
     )));
   }
 
-  function updateBananaPrice(model: string, imageSize: BananaImageSize, price: number) {
+  function updateBananaPrice(model: string, price: number) {
     setDraftBananaRows((current) => current.map((row) => (
-      row.model === model && row.imageSize === imageSize
+      row.model === model
         ? { ...row, price: Math.max(0, Number(price || 0)) }
         : row
     )));
-  }
-
-  function renameBananaModel(model: string, nextModel: string) {
-    setDraftBananaRows((current) => current.map((row) => (
-      row.model === model ? { ...row, model: nextModel.trim() } : row
-    )));
-  }
-
-  function addBananaModel() {
-    const existing = new Set(draftBananaRows.map((row) => row.model));
-    let index = 1;
-    let model = `gemini-image-model-${index}`;
-    while (existing.has(model)) {
-      index += 1;
-      model = `gemini-image-model-${index}`;
-    }
-    setDraftBananaRows((current) => [
-      ...current,
-      ...bananaSizeOrder.map((imageSize) => ({ model, imageSize, price: 0 })),
-    ]);
-  }
-
-  function removeBananaModel(model: string) {
-    setDraftBananaRows((current) => current.filter((row) => row.model !== model));
   }
 
   const tableData: PricingTableRow[] = tierOrder.map((tier) => {
@@ -139,13 +112,11 @@ export function ImagePricingPage({ catalog, saving, onSave }: ImagePricingPagePr
     return row;
   });
 
-  const bananaTableData: BananaPricingTableRow[] = Array.from(new Set(draftBananaRows.map((row) => row.model))).map((model) => {
-    const row = { key: model, model } as BananaPricingTableRow;
-    for (const imageSize of bananaSizeOrder) {
-      row[imageSize] = draftBananaRows.find((item) => item.model === model && item.imageSize === imageSize)?.price || 0;
-    }
-    return row;
-  });
+  const bananaTableData: BananaPricingTableRow[] = BANANA_MODELS.map((modelDefinition) => ({
+    key: modelDefinition.id,
+    model: modelDefinition.id,
+    price: draftBananaRows.find((item) => item.model === modelDefinition.id)?.price || 0,
+  }));
 
   return (
     <div className="page-stack">
@@ -156,7 +127,7 @@ export function ImagePricingPage({ catalog, saving, onSave }: ImagePricingPagePr
           <Button
             type="primary"
             loading={saving}
-            disabled={!isDirty || hasInvalidBananaModel}
+            disabled={!isDirty}
             onClick={() => onSave(draftRows, draftBananaRows, chatCompletionsUnitPriceYuan)}
           >
             保存售价配置
@@ -168,7 +139,7 @@ export function ImagePricingPage({ catalog, saving, onSave }: ImagePricingPagePr
         type="info"
         showIcon
         message="固定线路一口价优先于共享售价表"
-        description="OpenAI 图像按档位和画质计价；Banana 图像按实际提交上游的模型名称和 imageSize（几K）计价，aspectRatio 仅用于能力过滤和审计；Chat Completions 按成功请求次数计价。"
+        description="OpenAI 图像按档位和画质计价；Banana 图像只按实际提交上游的模型名称计价，K 档位与比例仅用于能力过滤和审计；Chat Completions 按成功请求次数计价。"
       />
 
       <Tabs
@@ -215,39 +186,34 @@ export function ImagePricingPage({ catalog, saving, onSave }: ImagePricingPagePr
             children: (
               <Card>
                 <Space direction="vertical" size={16} style={{ width: '100%' }}>
-                  <SectionTitle desc="每个 Banana 模型独立定价。只按 model 与 imageSize（几K）计价，不按具体像素尺寸换算，也不将比例作为价格维度。">
+                  <SectionTitle desc="售价模型固定为 Python 接口示例中的两个 Banana 模型。每个模型只有一个单价；K 档位和比例不参与售价计算。">
                     Banana 图像售价（元 / 张）
                   </SectionTitle>
-                  <Button onClick={addBananaModel}>新增 Banana 模型</Button>
                   <Table
                     rowKey="key"
                     size="small"
                     pagination={false}
                     dataSource={bananaTableData}
-                    locale={{ emptyText: '尚未配置 Banana 模型售价' }}
-                    scroll={{ x: 760 }}
+                    locale={{ emptyText: '暂无 Banana 模型售价' }}
+                    scroll={{ x: 620 }}
                     columns={[
                       {
                         title: '模型名称',
                         dataIndex: 'model',
                         width: 360,
-                        render: (value: string) => <Input value={value} onChange={(event) => renameBananaModel(value, event.target.value)} />,
-                      },
-                      ...bananaSizeOrder.map((imageSize) => ({
-                        title: imageSize.toUpperCase(),
-                        dataIndex: imageSize,
-                        width: 150,
-                        render: (value: number, record: BananaPricingTableRow) => (
-                          <InputNumber min={0} precision={5} step={0.00001} value={value} style={{ width: '100%' }} onChange={(next) => updateBananaPrice(record.model, imageSize, Number(next || 0))} />
+                        render: (value: string) => (
+                          <Space direction="vertical" size={0}>
+                            <Text>{BANANA_MODELS.find((item) => item.id === value)?.label || value}</Text>
+                            <Text type="secondary" code>{value}</Text>
+                          </Space>
                         ),
-                      })),
+                      },
                       {
-                        title: '操作',
-                        width: 100,
-                        render: (_value: unknown, record: BananaPricingTableRow) => (
-                          <Popconfirm title="删除该模型的全部 Banana 售价？" onConfirm={() => removeBananaModel(record.model)}>
-                            <Button danger type="link">删除</Button>
-                          </Popconfirm>
+                        title: '售价（元 / 张）',
+                        dataIndex: 'price',
+                        width: 220,
+                        render: (value: number, record: BananaPricingTableRow) => (
+                          <InputNumber min={0} precision={5} step={0.00001} value={value} style={{ width: '100%' }} onChange={(next) => updateBananaPrice(record.model, Number(next || 0))} />
                         ),
                       },
                     ]}

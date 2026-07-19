@@ -11,6 +11,7 @@
   "dependencies": {
     "@ant-design/icons": "^6.2.5",
     "@yali/billing-core": "workspace:*",
+    "@yali/provider-core": "workspace:*",
     "antd": "^6.4.5",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"

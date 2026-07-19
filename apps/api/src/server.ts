@@ -5463,9 +5463,9 @@ function resolveImageSellPriceCents(input: {
   return Math.max(0, yuanToMinorUnits(resolveImageSellPrice(input)));
 }
 
-function resolveBananaImageSellPriceCents(model: string, imageSize: '1k' | '2k' | '4k') {
+function resolveBananaImageSellPriceCents(model: string) {
   const row = (adminConsoleCatalogStore.get().bananaImagePricingMatrix || []).find((item) => (
-    item.model === model && item.imageSize === imageSize
+    item.model === model
   ));
   return Math.max(0, yuanToMinorUnits(Number(row?.price || 0)));
 }
@@ -5633,12 +5633,12 @@ async function buildActualImageBilling(input: {
     const fixedUnitCents = resolveFixedApiKeyImageSellPriceCents(input.accessContext);
     const chargedCredits = fixedUnitCents > 0
       ? fixedUnitCents
-      : resolveBananaImageSellPriceCents(input.payload.model, imageSize);
+      : resolveBananaImageSellPriceCents(input.payload.model);
     const catalog = adminConsoleCatalogStore.get();
     const upstream = catalog.upstreams.find((item) => item.id === input.upstreamId);
     const capability = upstream?.bananaConfig?.modelCapabilities.find((item) => item.model === input.payload.model);
-    const hasConfiguredCost = Boolean(capability?.costs && Object.prototype.hasOwnProperty.call(capability.costs, imageSize));
-    const costYuan = Number(capability?.costs?.[imageSize] || 0);
+    const hasConfiguredCost = Boolean(capability && Object.prototype.hasOwnProperty.call(capability, 'cost'));
+    const costYuan = Number(capability?.cost || 0);
     const upstreamCostCredits = hasConfiguredCost && Number.isFinite(costYuan) && costYuan >= 0
       ? yuanToMinorUnits(costYuan)
       : 0;
@@ -5668,13 +5668,13 @@ async function buildActualImageBilling(input: {
         submittedAspectRatio: String(input.payload.extra_body?.banana_aspect_ratio || '') || null,
         billedModel: input.payload.model,
         billedTier: imageSize,
-        billingMode: fixedUnitCents > 0 ? 'fixed_provider_flat_price' : 'banana_model_image_size_price',
-        billingModeLabel: fixedUnitCents > 0 ? '固定线路一口价' : 'Banana 模型与尺寸定价',
+        billingMode: fixedUnitCents > 0 ? 'fixed_provider_flat_price' : 'banana_model_price',
+        billingModeLabel: fixedUnitCents > 0 ? '固定线路一口价' : 'Banana 模型定价',
         upstreamCostConfigured: hasConfiguredCost,
         upstreamCostMinorUnits: hasConfiguredCost ? upstreamCostCredits : null,
         upstreamCostYuan: hasConfiguredCost ? minorUnitsToYuan(upstreamCostCredits) : null,
         upstreamCostModel: input.payload.model,
-        upstreamCostImageSize: imageSize,
+        upstreamCostDimension: 'model',
       },
     }));
     const totalChargedCredits = chargedCredits * resultCount;
@@ -5692,7 +5692,7 @@ async function buildActualImageBilling(input: {
         requestedModel: input.payload.model,
         requestedImageSize: imageSize,
         requestedAspectRatio: String(input.payload.extra_body?.banana_aspect_ratio || '') || null,
-        billingMode: fixedUnitCents > 0 ? 'fixed_provider_flat_price' : 'banana_model_image_size_price',
+        billingMode: fixedUnitCents > 0 ? 'fixed_provider_flat_price' : 'banana_model_price',
         billedImages: resultCount,
         amountCents: totalChargedCredits,
       },
@@ -7297,9 +7297,9 @@ app.post('/v1beta/models/:model(^[^:]+):generateContent', async (request, reply)
       return buildBananaNativeError(403, 'This API key is not allowed to use the requested Banana image size.', 'PERMISSION_DENIED');
     }
     const fixedPrice = resolveFixedApiKeyImageSellPriceCents(accessContext);
-    if (fixedPrice <= 0 && resolveBananaImageSellPriceCents(payload.model, imageSize) <= 0) {
+    if (fixedPrice <= 0 && resolveBananaImageSellPriceCents(payload.model) <= 0) {
       reply.code(422);
-      return buildBananaNativeError(422, 'No Banana selling price is configured for this model and imageSize.', 'FAILED_PRECONDITION');
+      return buildBananaNativeError(422, 'No Banana selling price is configured for this model.', 'FAILED_PRECONDITION');
     }
   }
   const budget = await ensureTenantPositiveBalance({ accessContext });

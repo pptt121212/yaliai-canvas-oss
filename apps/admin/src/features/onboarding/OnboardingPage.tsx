@@ -1,5 +1,6 @@
 import { Alert, Button, Card, Descriptions, Form, Image, Input, InputNumber, List, Select, Space, Switch, Tag, Timeline, Typography } from 'antd';
 import { DeleteOutlined, PlusOutlined } from '@ant-design/icons';
+import { BANANA_MODELS } from '@yali/provider-core';
 import { useState } from 'react';
 import type {
   ImageBackgroundMode,
@@ -148,6 +149,12 @@ const reservedCustomBodyFieldKeysByKind: Record<OnboardingFormValues['targetKind
 };
 
 function modelDefaultsForKind(kind: OnboardingFormValues['targetKind']) {
+  if (kind === 'banana_endpoint') {
+    return {
+      model: BANANA_MODELS[0].id,
+      imageModel: undefined,
+    };
+  }
   if (kind === 'responses_endpoint') {
     return {
       model: 'gpt-5.4-mini',
@@ -378,10 +385,15 @@ export function OnboardingPage({ saving, onAnalyze, onAccept }: OnboardingPagePr
     form.setFieldsValue({
       targetKind: kind,
       ...modelDefaultsForKind(kind),
+      baseUrl: kind === 'banana_endpoint'
+        ? 'https://sub.g-aisc.com/'
+        : form.getFieldValue('baseUrl'),
       size: kind === 'chat_completions'
         ? undefined
         : kind === 'responses_endpoint'
           ? (form.getFieldValue('size') || 'auto')
+          : kind === 'banana_endpoint'
+            ? '4K'
           : (form.getFieldValue('size') || '1600x1200'),
       referenceImageUrl: kind === 'chat_completions'
         ? undefined
@@ -538,8 +550,15 @@ export function OnboardingPage({ saving, onAnalyze, onAccept }: OnboardingPagePr
               <Select options={targetKindOptions} onChange={handleTargetKindChange} />
             </Form.Item>
             {currentKind !== 'images_endpoint' ? (
-              <Form.Item name="baseUrl" label="接入地址" rules={[{ required: true, message: '请输入上游地址' }]}>
-                <Input placeholder="请直接填写上游真实完整 URL，系统不会自动补全路径" />
+              <Form.Item
+                name="baseUrl"
+                label="接入地址"
+                rules={[{ required: true, message: '请输入上游地址' }]}
+                extra={currentKind === 'banana_endpoint'
+                  ? '按 Python 示例填写服务根地址，例如 https://sub.g-aisc.com/。向导会固定请求 /v1beta/models/{model}:generateContent；文生图和图生图不填写两条地址。'
+                  : undefined}
+              >
+                <Input placeholder={currentKind === 'banana_endpoint' ? '例如 https://sub.g-aisc.com/' : '请直接填写上游真实完整 URL，系统不会自动补全路径'} />
               </Form.Item>
             ) : null}
             <Form.Item name="apiKey" label="API 密钥">
@@ -625,11 +644,34 @@ export function OnboardingPage({ saving, onAnalyze, onAccept }: OnboardingPagePr
                   <Input placeholder="例如 gpt-4.1-mini" />
                 </Form.Item>
               ) : null}
+              {currentKind === 'banana_endpoint' ? (
+                <>
+                  <SectionTitle desc="模型固定为 Python 接口示例中的两个 Banana 模型。选择后，向导会用原生 Gemini generateContent 格式探测文生图；参考图可下载时再追加 inlineData 图生图探测。">
+                    Banana 探测参数
+                  </SectionTitle>
+                  <Form.Item name="model" label="绑定模型">
+                    <Select options={BANANA_MODELS.map((item) => ({ value: item.id, label: `${item.label} (${item.id})` }))} />
+                  </Form.Item>
+                  <Alert
+                    type="info"
+                    showIcon
+                    style={{ marginBottom: 16 }}
+                    message="文生图和图生图共用一个地址"
+                    description="两类请求均使用 /v1beta/models/{model}:generateContent；图生图仅在 contents[].parts[] 中额外写入 inlineData，不存在 OpenAI Images 的 generations / edits 两条上游地址。"
+                  />
+                </>
+              ) : null}
               {currentKind !== 'chat_completions' ? (
                 <>
-                  <Form.Item name="size" label="测试尺寸">
-                    <Input placeholder={currentKind === 'responses_endpoint' ? '例如 auto、1536x1024 或 1024x1024' : '例如 1600x1200 或 1024x1024'} />
-                  </Form.Item>
+                  {currentKind === 'banana_endpoint' ? (
+                    <Form.Item name="size" label="测试 imageSize">
+                      <Select options={['1K', '2K', '4K'].map((value) => ({ value, label: value }))} />
+                    </Form.Item>
+                  ) : (
+                    <Form.Item name="size" label="测试尺寸">
+                      <Input placeholder={currentKind === 'responses_endpoint' ? '例如 auto、1536x1024 或 1024x1024' : '例如 1600x1200 或 1024x1024'} />
+                    </Form.Item>
+                  )}
                   <Form.Item name="referenceImageUrl" label="参考图 URL">
                     <Input placeholder="图生图探测时使用的公网图片地址" />
                   </Form.Item>

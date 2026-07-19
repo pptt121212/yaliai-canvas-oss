@@ -28,6 +28,25 @@ export type ProviderProtocol =
   | 'gemini_generate_content'
   | 'custom_async_media';
 
+// Banana is intentionally a closed model family for now. Keep the catalog
+// here so gateway validation and admin controls cannot drift apart.
+export const BANANA_MODELS = [
+  {
+    id: 'gemini-3-pro-image',
+    label: 'Gemini 3 Pro Image',
+  },
+  {
+    id: 'gemini-3.1-flash-image',
+    label: 'Gemini 3.1 Flash Image',
+  },
+] as const;
+
+export type BananaModelId = (typeof BANANA_MODELS)[number]['id'];
+
+export function isBananaModelId(value: unknown): value is BananaModelId {
+  return BANANA_MODELS.some((model) => model.id === value);
+}
+
 export type ProviderCapability = {
   supportsSync?: boolean;
   supportsAsync?: boolean;

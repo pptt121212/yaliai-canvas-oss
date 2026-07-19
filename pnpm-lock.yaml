@@ -16,6 +16,9 @@ importers:
       '@yali/billing-core':
         specifier: workspace:*
         version: link:../../packages/billing-core
+      '@yali/provider-core':
+        specifier: workspace:*
+        version: link:../../packages/provider-core
       antd:
         specifier: ^6.4.5
         version: 6.4.5(react-dom@19.2.7(react@19.2.7))(react@19.2.7)

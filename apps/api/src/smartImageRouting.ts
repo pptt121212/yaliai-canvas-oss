@@ -209,7 +209,7 @@ type BananaCapabilityMetadata = {
   imageSizes?: unknown;
   aspectRatios?: unknown;
   supportsReferenceImages?: unknown;
-  costs?: unknown;
+  cost?: unknown;
 };
 
 function providerBananaCapabilities(provider: ProviderConfig): BananaCapabilityMetadata[] {
@@ -245,13 +245,10 @@ function providerSupportsBananaRequest(provider: ProviderConfig, context: ImageR
   return null;
 }
 
-function providerBananaCost(provider: ProviderConfig, model: string, imageSize?: '1k' | '2k' | '4k') {
+function providerBananaCost(provider: ProviderConfig, model: string) {
   const capability = providerBananaCapability(provider, model);
-  const costs = capability?.costs && typeof capability.costs === 'object'
-    ? capability.costs as Record<string, unknown>
-    : {};
-  const configured = Boolean(imageSize && Object.prototype.hasOwnProperty.call(costs, imageSize));
-  const value = configured && imageSize ? Number(costs[imageSize]) : 0;
+  const configured = Boolean(capability && Object.prototype.hasOwnProperty.call(capability, 'cost'));
+  const value = configured ? Number(capability?.cost) : 0;
   return {
     // A configured zero cost is meaningful and must not be treated as absent.
     value: configured && Number.isFinite(value) && value >= 0 ? value : 0,
@@ -639,7 +636,7 @@ function priceForProvider(
   context: ImageRoutingRequestContext,
 ) {
   if (provider.protocol === 'gemini_generate_content') {
-    return providerBananaCost(provider, context.requestedModel, context.bananaImageSize);
+    return providerBananaCost(provider, context.requestedModel);
   }
   return providerCapabilityCost(provider, requestedTierValue, requestedQualityValue);
 }

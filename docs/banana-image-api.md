@@ -49,11 +49,19 @@ form. It does not rewrite it into an OpenAI `data[]` response.
 ## Configuration
 
 1. Add an upstream with type `Banana / Gemini image`.
-2. Configure its authentication mode, endpoint prefix, models, image sizes,
-   aspect ratios, reference-image support, and cost in yuan per image.
-3. Enable that upstream in the image-generation channel.
-4. In the pricing page, configure every sell-price key as `model + imageSize`.
-5. Issue a tenant API Key with downstream type `Banana image`; optionally
+2. Enter the upstream service root, for example `https://sub.g-aisc.com/`.
+   Do not enter separate OpenAI `generations` or `edits` URLs. The gateway
+   always calls `/v1beta/models/{model}:generateContent`.
+3. Select exactly one model for that upstream. The supported catalog is fixed
+   to `gemini-3-pro-image` and `gemini-3.1-flash-image`, the
+   two models in the supplied Python request examples.
+4. Configure the model's supported image sizes, aspect ratios,
+   reference-image capability, and one fixed cost in yuan per image.
+5. Enable that upstream in the image-generation channel.
+6. In the pricing page, configure one sell price for each fixed model. The
+   page always contains the two models and does not allow adding, renaming, or
+   deleting models.
+7. Issue a tenant API Key with downstream type `Banana image`; optionally
    restrict models and image sizes.
 
 Routing treats model, `imageSize`, aspect ratio, and reference-image support as
@@ -62,13 +70,40 @@ latency, cost-speed ranking, cooldown, retry, and failover mechanisms.
 
 ## Billing And Cost
 
-- The charged sell price is selected by the model and `imageSize` actually
-  submitted upstream.
-- Aspect ratio is recorded for audit and capability filtering, not pricing.
+- The charged sell price is selected only by the model actually submitted
+  upstream.
+- Image size and aspect ratio are recorded for audit and capability filtering,
+  not pricing.
 - A fixed-provider Key price overrides the shared sell-price matrix.
-- Upstream cost is selected by `upstream + model + imageSize` and is written to
-  the billing ledger, task record, request trace, and operational aggregates.
+- Upstream cost is selected by `upstream + model` and is written to the billing
+  ledger, task record, request trace, and operational aggregates.
 - A zero upstream cost is a valid configured cost and is not treated as missing.
+
+## Upstream Request Contract
+
+The gateway follows the supplied Python examples rather than OpenAI Images:
+
+- It sends both `Authorization: Bearer {key}` and `x-goog-api-key: {key}` by
+  default. Either mode can be selected only when an upstream requires it.
+- Text-to-image sends `contents[].parts[].text` plus
+  `generationConfig.responseModalities` and `generationConfig.imageConfig`.
+- Image-to-image uses the same endpoint and body, adding an
+  `inlineData: { mimeType, data }` part. It does not use multipart uploads,
+  `images/edits`, or image URLs upstream.
+- Successful images are read from the native response's `inlineData` or
+  `inline_data` Base64 payload.
+
+Each upstream represents one selected model with one fixed cost. Mark only
+image sizes the upstream actually supports: an unchecked K tier is excluded
+from routing, while an explicit cost of `0` remains a valid exact cost.
+
+## Onboarding
+
+Choose `Banana / Gemini image`, enter the service root, select one of the two
+fixed models, and choose an `imageSize`. The wizard sends a native text-to-
+image probe. When it can download the supplied reference image, it also sends
+a separate native image-to-image probe with Base64 `inlineData`; the saved
+line enables reference-image routing only when that second probe succeeds.
 
 ## Extending Native Image APIs
 

@@ -18,6 +18,7 @@ import {
   Typography,
 } from 'antd';
 import { DeleteOutlined, PlusOutlined } from '@ant-design/icons';
+import { BANANA_MODELS } from '@yali/provider-core';
 import { useEffect, useMemo, useState } from 'react';
 import {
   CodeBlock,
@@ -230,6 +231,15 @@ const imageReturnModeOptions = [
   { value: 'json', label: '上游标准 JSON（不向上游发送 stream=true）' },
   { value: 'stream', label: '上游原生 SSE（仅上游明确支持 stream=true 时选择）' },
 ];
+
+function defaultBananaModelCapabilities(): BananaModelCapability[] {
+  return [{
+    model: BANANA_MODELS[0].id,
+    imageSizes: ['1k', '2k', '4k'],
+    aspectRatios: ['16:9'],
+    supportsReferenceImages: false,
+  }];
+}
 
 const imageEditProtocolOptions = [
   { value: 'multipart_file_upload', label: 'multipart/form-data + image 文件上传' },
@@ -717,11 +727,11 @@ const emptyUpstream: ConsoleUpstream = {
     imageQuality: undefined,
   },
   bananaConfig: {
-    authMode: 'x_goog_api_key',
+    authMode: 'both',
     supportsTextToImage: true,
-    supportsImageToImage: true,
+    supportsImageToImage: false,
     generationPathPrefix: '/v1beta/models',
-    modelCapabilities: [],
+    modelCapabilities: defaultBananaModelCapabilities(),
   },
   chatConfig: {
     supportsSystemPrompt: true,
@@ -739,16 +749,16 @@ function protocolDefaults(kind: ConsoleUpstream['kind']): Partial<FormShape> {
       injectHeadersList: [],
       injectBodyFieldsList: [],
       testOperation: 'generations',
-      testModel: '',
+      testModel: BANANA_MODELS[0].id,
       testPrompt: 'A clean studio product photograph of a small orange cat.',
-      testSize: '1k',
+      testSize: '4k',
       testReferenceImageUrl: localReferenceImageUrl,
       testN: 1,
-      bananaAuthMode: 'x_goog_api_key',
+      bananaAuthMode: 'both',
       bananaSupportsTextToImage: true,
-      bananaSupportsImageToImage: true,
+      bananaSupportsImageToImage: false,
       bananaGenerationPathPrefix: '/v1beta/models',
-      bananaModelCapabilities: [],
+      bananaModelCapabilities: defaultBananaModelCapabilities(),
     };
   }
   if (kind === 'responses_endpoint') {
@@ -999,6 +1009,16 @@ function normalizeTestOperation(
 }
 
 function buildAdminTestPreset(kind: ConsoleUpstream['kind'], values: FormShape): UpstreamTestPreset {
+  if (kind === 'banana_endpoint') {
+    const model = values.bananaModelCapabilities?.[0]?.model || BANANA_MODELS[0].id;
+    return {
+      operation: normalizeTestOperation(kind, values.testOperation),
+      model,
+      prompt: values.testPrompt,
+      size: values.testSize || '4k',
+      referenceImageUrl: values.testOperation === 'edits' ? values.testReferenceImageUrl || undefined : undefined,
+    };
+  }
   if (kind === 'responses_endpoint') {
     return {
       operation: 'responses',
@@ -1053,6 +1073,17 @@ function buildDraftTestRequest(
   operation: UpstreamTestRequest['operation'],
 ): UpstreamTestRequest {
   const normalizedOperation = normalizeTestOperation(kind, operation);
+
+  if (kind === 'banana_endpoint') {
+    const model = values.bananaModelCapabilities?.[0]?.model || BANANA_MODELS[0].id;
+    return {
+      operation: normalizedOperation,
+      model,
+      prompt: values.testPrompt,
+      size: values.testSize || '4k',
+      referenceImageUrl: normalizedOperation === 'edits' ? values.testReferenceImageUrl || undefined : undefined,
+    };
+  }
 
   if (kind === 'responses_endpoint') {
     return {
@@ -1178,11 +1209,13 @@ function toFormValues(upstream: ConsoleUpstream): FormShape {
     supportsTools: upstream.chatConfig?.supportsTools,
     supportsVisionInput: upstream.chatConfig?.supportsVisionInput,
     chatUpstreamCostYuan: upstream.chatConfig?.upstreamCostYuan,
-    bananaAuthMode: upstream.bananaConfig?.authMode || 'x_goog_api_key',
+    bananaAuthMode: upstream.bananaConfig?.authMode || 'both',
     bananaSupportsTextToImage: upstream.bananaConfig?.supportsTextToImage ?? true,
-    bananaSupportsImageToImage: upstream.bananaConfig?.supportsImageToImage ?? true,
+    bananaSupportsImageToImage: upstream.bananaConfig?.supportsImageToImage ?? false,
     bananaGenerationPathPrefix: upstream.bananaConfig?.generationPathPrefix || '/v1beta/models',
-    bananaModelCapabilities: upstream.bananaConfig?.modelCapabilities || [],
+    bananaModelCapabilities: upstream.bananaConfig?.modelCapabilities?.slice(0, 1).length
+      ? upstream.bananaConfig.modelCapabilities.slice(0, 1)
+      : defaultBananaModelCapabilities(),
   };
   return {
     ...protocolDefaults(upstream.kind),
@@ -1210,6 +1243,12 @@ function toUpstream(values: FormShape, original?: ConsoleUpstream | null): Conso
     fromKeyValueList(values.injectBodyFieldsList || []),
   );
   const imageRuntime = deriveImagesRuntimeFields(values);
+  const bananaCapability = kind === 'banana_endpoint'
+    ? (values.bananaModelCapabilities || [])[0] || defaultBananaModelCapabilities()[0]
+    : null;
+  const bananaModel = bananaCapability && BANANA_MODELS.some((item) => item.id === bananaCapability.model)
+    ? bananaCapability.model
+    : BANANA_MODELS[0].id;
   const upstream: ConsoleUpstream = {
     id: values.id || original?.id || `upstream_${Date.now()}`,
     name: values.name,
@@ -1219,10 +1258,12 @@ function toUpstream(values: FormShape, original?: ConsoleUpstream | null): Conso
     enabled: Boolean(values.enabled),
     maxConcurrency: Math.max(1, Math.floor(Number(values.maxConcurrency || 10))),
     healthStatus: values.healthStatus || original?.healthStatus || 'healthy',
-    modelHints: (() => {
+    modelHints: kind === 'banana_endpoint'
+      ? [bananaModel]
+      : (() => {
       const value = String(values.modelHintsText || '').trim();
       return value ? [value] : [];
-    })(),
+      })(),
     notes: values.notes || '',
     adminTestPreset: buildAdminTestPreset(kind, values),
     passthrough: kind === 'images_endpoint'
@@ -1276,17 +1317,17 @@ function toUpstream(values: FormShape, original?: ConsoleUpstream | null): Conso
       imageQuality: values.responsesImageQuality ?? undefined,
     } : undefined,
     bananaConfig: kind === 'banana_endpoint' ? {
-      authMode: values.bananaAuthMode || 'x_goog_api_key',
+      authMode: values.bananaAuthMode || 'both',
       supportsTextToImage: values.bananaSupportsTextToImage !== false,
       supportsImageToImage: values.bananaSupportsImageToImage !== false,
       generationPathPrefix: values.bananaGenerationPathPrefix || '/v1beta/models',
-      modelCapabilities: (values.bananaModelCapabilities || []).map((item) => ({
-        model: String(item.model || '').trim(),
-        imageSizes: item.imageSizes || [],
-        aspectRatios: item.aspectRatios || [],
-        supportsReferenceImages: item.supportsReferenceImages === true,
-        costs: item.costs || {},
-      })).filter((item) => item.model),
+      modelCapabilities: [{
+        model: bananaModel,
+        imageSizes: bananaCapability?.imageSizes || [],
+        aspectRatios: bananaCapability?.aspectRatios || [],
+        supportsReferenceImages: bananaCapability?.supportsReferenceImages === true,
+        ...(bananaCapability?.cost === undefined ? {} : { cost: bananaCapability.cost }),
+      }],
     } : undefined,
     chatConfig: kind === 'chat_completions' ? {
       supportsSystemPrompt: Boolean(values.supportsSystemPrompt),
@@ -1456,6 +1497,7 @@ export function UpstreamsPage({ catalog, saving, onSave, onDelete, onTest }: Ups
   const [testError, setTestError] = useState('');
 
   const currentKind = Form.useWatch('kind', form) || 'images_endpoint';
+  const selectedBananaModel = Form.useWatch(['bananaModelCapabilities', 0, 'model'], form);
   const currentImageEditProtocolModes = Form.useWatch('imageEditProtocolModes', form) || [];
   const currentResponseFormats = Form.useWatch('responseFormats', form) || [];
   const currentResponsesResponseFormats = Form.useWatch('responsesResponseFormats', form) || [];
@@ -1665,9 +1707,11 @@ export function UpstreamsPage({ catalog, saving, onSave, onDelete, onTest }: Ups
                 name="baseUrl"
                 label="基础地址"
                 rules={[{ required: true }]}
-                extra="按原样保存并按原样请求你填写的地址。这里请直接填写上游真实完整 URL，系统不会自动补全路径。"
+                extra={currentKind === 'banana_endpoint'
+                  ? '填写上游服务根地址或网关根路径，例如 https://sub.g-aisc.com/。系统会按固定协议请求 /v1beta/models/{model}:generateContent，不需要填写文生图或图生图两个地址。'
+                  : '按原样保存并按原样请求你填写的地址。这里请直接填写上游真实完整 URL，系统不会自动补全路径。'}
               >
-                <Input placeholder="例如 https://example.com/v1/responses" />
+                <Input placeholder={currentKind === 'banana_endpoint' ? '例如 https://sub.g-aisc.com/' : '例如 https://example.com/v1/responses'} />
               </Form.Item>
             </Col>
               <Col span={12}>
@@ -1692,6 +1736,13 @@ export function UpstreamsPage({ catalog, saving, onSave, onDelete, onTest }: Ups
                   </StatusDot>
                 </Form.Item>
               </Col>
+              {currentKind === 'banana_endpoint' ? (
+                <Col span={12}>
+                  <Form.Item label="下游请求模型匹配" extra="Banana 线路固定绑定下方选择的一个模型，系统会自动按该模型过滤路由。">
+                    <Input value={selectedBananaModel || BANANA_MODELS[0].id} disabled />
+                  </Form.Item>
+                </Col>
+              ) : (
               <Col span={12}>
                 <Form.Item
                   name="modelHintsText"
@@ -1701,6 +1752,7 @@ export function UpstreamsPage({ catalog, saving, onSave, onDelete, onTest }: Ups
                   <Input placeholder="例如 gpt-image-2" />
                 </Form.Item>
               </Col>
+              )}
               <Col span={12}>
                 <Form.Item
                   name="maxConcurrency"
@@ -2065,7 +2117,7 @@ export function UpstreamsPage({ catalog, saving, onSave, onDelete, onTest }: Ups
 
           {currentKind === 'banana_endpoint' ? (
             <>
-              <SectionTitle desc="Banana 使用 Gemini generateContent 原生协议。模型、K 档位和比例是路由硬条件；每个模型每个 K 档位单独配置成本。">
+              <SectionTitle desc="Banana 使用 Gemini generateContent 原生协议。一条上游只绑定一个模型；模型、K 档位、比例和参考图能力都是路由硬条件。">
                 Banana / Gemini 图像配置
               </SectionTitle>
               <Card size="small" className="upstream-config-card">
@@ -2088,28 +2140,64 @@ export function UpstreamsPage({ catalog, saving, onSave, onDelete, onTest }: Ups
                   </Col>
                 </Row>
               </Card>
-              <Card size="small" title="模型能力与上游成本（元 / 张）" className="upstream-config-card" style={{ marginTop: 16 }}>
-                <Form.List name="bananaModelCapabilities">
-                  {(fields, { add, remove }) => (
-                    <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                      {fields.map((field) => (
-                        <Card size="small" key={field.key}>
-                          <Row gutter={12}>
-                            <Col span={8}><Form.Item name={[field.name, 'model']} label="模型" rules={[{ required: true }]}><Input placeholder="例如 gemini-2.5-flash-image" /></Form.Item></Col>
-                            <Col span={8}><Form.Item name={[field.name, 'imageSizes']} label="支持图像尺寸"><Select mode="multiple" options={['1k', '2k', '4k'].map((value) => ({ value, label: value.toUpperCase() }))} /></Form.Item></Col>
-                            <Col span={8}><Form.Item name={[field.name, 'aspectRatios']} label="支持比例"><Select mode="tags" placeholder="例如 1:1、16:9" /></Form.Item></Col>
-                            <Col span={8}><Form.Item name={[field.name, 'supportsReferenceImages']} label="支持参考图" valuePropName="checked"><Switch /></Form.Item></Col>
-                            <Col span={5}><Form.Item name={[field.name, 'costs', '1k']} label="1K 成本"><InputNumber min={0} precision={5} step={0.00001} style={{ width: '100%' }} /></Form.Item></Col>
-                            <Col span={5}><Form.Item name={[field.name, 'costs', '2k']} label="2K 成本"><InputNumber min={0} precision={5} step={0.00001} style={{ width: '100%' }} /></Form.Item></Col>
-                            <Col span={5}><Form.Item name={[field.name, 'costs', '4k']} label="4K 成本"><InputNumber min={0} precision={5} step={0.00001} style={{ width: '100%' }} /></Form.Item></Col>
-                            <Col span={6} style={{ display: 'flex', alignItems: 'end' }}><Button danger onClick={() => remove(field.name)}>移除模型</Button></Col>
-                          </Row>
-                        </Card>
-                      ))}
-                      <Button type="dashed" icon={<PlusOutlined />} onClick={() => add({ imageSizes: ['1k'], aspectRatios: ['1:1'], supportsReferenceImages: false, costs: {} })}>新增模型能力</Button>
-                    </Space>
-                  )}
-                </Form.List>
+              <Card size="small" title="固定模型能力与上游成本（元 / 张）" className="upstream-config-card" style={{ marginTop: 16 }}>
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginBottom: 16 }}
+                  message="一个 Banana 上游配置只代表一个模型"
+                  description="选择该线路实际调用的模型后，只填写一次固定上游成本。K 档位、比例和参考图仅用于能力过滤与请求审计；成本为 0 是有效配置。"
+                />
+                <Row gutter={12}>
+                  <Col span={8}>
+                    <Form.Item name={['bananaModelCapabilities', 0, 'model']} label="绑定模型" rules={[{ required: true }]}>
+                      <Select options={BANANA_MODELS.map((item) => ({ value: item.id, label: `${item.label} (${item.id})` }))} />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}>
+                    <Form.Item name={['bananaModelCapabilities', 0, 'imageSizes']} label="支持图像尺寸">
+                      <Select mode="multiple" options={['1k', '2k', '4k'].map((value) => ({ value, label: value.toUpperCase() }))} />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}>
+                    <Form.Item name={['bananaModelCapabilities', 0, 'aspectRatios']} label="支持比例">
+                      <Select mode="tags" placeholder="例如 1:1、16:9" />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}>
+                    <Form.Item name={['bananaModelCapabilities', 0, 'supportsReferenceImages']} label="支持参考图" valuePropName="checked">
+                      <Switch />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}><Form.Item name={['bananaModelCapabilities', 0, 'cost']} label="上游固定成本（元 / 张）"><InputNumber min={0} precision={5} step={0.00001} style={{ width: '100%' }} /></Form.Item></Col>
+                </Row>
+              </Card>
+              <Card size="small" title="测试预设" className="upstream-config-card" style={{ marginTop: 16 }}>
+                <Row gutter={12}>
+                  <Col span={8}>
+                    <Form.Item name="testOperation" label="测试类型">
+                      <Select options={[
+                        { value: 'generations', label: '文生图' },
+                        { value: 'edits', label: '图生图' },
+                      ]} />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}>
+                    <Form.Item label="测试模型">
+                      <Input value={selectedBananaModel || BANANA_MODELS[0].id} disabled />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}>
+                    <Form.Item name="testSize" label="测试 imageSize">
+                      <Select options={['1k', '2k', '4k'].map((value) => ({ value, label: value.toUpperCase() }))} />
+                    </Form.Item>
+                  </Col>
+                  <Col span={24}>
+                    <Form.Item name="testReferenceImageUrl" label="图生图参考图 URL" extra="仅选择“图生图”测试时会下载为 Base64，并按 Python 示例写入 contents[].parts[].inlineData。">
+                      <Input placeholder="https://example.com/reference.png" />
+                    </Form.Item>
+                  </Col>
+                </Row>
               </Card>
             </>
           ) : null}

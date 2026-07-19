@@ -481,7 +481,9 @@ export async function buildBananaRequestPlan(provider: ProviderConfig, request: 
     parts.push({ inlineData });
   }
 
-  const authMode = String(provider.metadata?.banana_auth_mode || 'x_goog_api_key');
+  // Match the native Banana/Gemini integration contract even for legacy
+  // configurations that predate the explicit auth-mode field.
+  const authMode = String(provider.metadata?.banana_auth_mode || 'both');
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Accept: 'application/json',

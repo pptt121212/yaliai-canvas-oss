@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { FastifyRequest } from 'fastify';
+import { BANANA_MODELS, isBananaModelId, type BananaModelId } from '@yali/provider-core';
 import { providerRegistry } from '../../providerRegistry.js';
 import { hasEnabledImageCapabilityTier } from '../imageCapabilityMatrix.js';
 import { createJsonStore } from '../storage/jsonStore.js';
@@ -120,22 +121,20 @@ export type ImageSellPriceRow = {
 export type BananaImageSize = '1k' | '2k' | '4k';
 export type DownstreamImageApiType = 'openai_images' | 'banana_images';
 
-// Banana/Gemini image pricing is model-specific. Aspect ratio is a capability
-// constraint and audit value, not a price dimension.
+// Banana/Gemini pricing is model-specific. Size, aspect ratio, and reference
+// input are capability and audit dimensions, not price dimensions.
 export type BananaImageSellPriceRow = {
-  model: string;
-  imageSize: BananaImageSize;
+  model: BananaModelId;
   price: number;
 };
 
-// Banana uses Gemini generateContent semantics. Model and imageSize are both
-// hard capability and cost dimensions; aspect ratio is only a capability.
+// One Banana upstream is bound to exactly one model and has one fixed cost.
 export type BananaModelCapability = {
-  model: string;
+  model: BananaModelId;
   imageSizes: BananaImageSize[];
   aspectRatios: string[];
   supportsReferenceImages: boolean;
-  costs?: Partial<Record<BananaImageSize, number>>;
+  cost?: number;
 };
 
 export type BananaEndpointConfig = {
@@ -575,11 +574,16 @@ function defaultImageCapabilityProfiles(): ImageCapabilityProfile[] {
 
 function defaultBananaConfig(): BananaEndpointConfig {
   return {
-    authMode: 'x_goog_api_key',
+    authMode: 'both',
     supportsTextToImage: true,
-    supportsImageToImage: true,
+    supportsImageToImage: false,
     generationPathPrefix: '/v1beta/models',
-    modelCapabilities: [],
+    modelCapabilities: [{
+      model: BANANA_MODELS[0].id,
+      imageSizes: ['1k', '2k', '4k'],
+      aspectRatios: ['16:9'],
+      supportsReferenceImages: false,
+    }],
   };
 }
 
@@ -594,27 +598,29 @@ function normalizeBananaImageSizes(input: unknown): BananaImageSize[] {
 
 function normalizeBananaModelCapabilities(input: unknown): BananaModelCapability[] {
   const source = Array.isArray(input) ? input : [];
-  const byModel = new Map<string, BananaModelCapability>();
+  const capabilities: BananaModelCapability[] = [];
   for (const item of source) {
     if (!item || typeof item !== 'object') {
       continue;
     }
     const record = item as Record<string, unknown>;
     const model = String(record.model || '').trim();
-    if (!model) {
+    if (!isBananaModelId(model) || capabilities.length) {
       continue;
     }
-    const costs: Partial<Record<BananaImageSize, number>> = {};
-    const rawCosts = record.costs && typeof record.costs === 'object'
-      ? record.costs as Record<string, unknown>
-      : {};
-    for (const imageSize of ['1k', '2k', '4k'] as const) {
-      const value = Number(rawCosts[imageSize] || 0);
-      if (Number.isFinite(value) && value >= 0) {
-        costs[imageSize] = value;
-      }
-    }
-    byModel.set(model, {
+    const directCost = Number(record.cost);
+    const legacyCosts = record.costs && typeof record.costs === 'object'
+      ? Object.values(record.costs as Record<string, unknown>)
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value) && value >= 0)
+      : [];
+    const legacyDistinctCosts = Array.from(new Set(legacyCosts));
+    const cost = Number.isFinite(directCost) && directCost >= 0
+      ? directCost
+      : legacyDistinctCosts.length === 1
+        ? legacyDistinctCosts[0]
+        : undefined;
+    capabilities.push({
       model,
       imageSizes: normalizeBananaImageSizes(record.imageSizes),
       aspectRatios: Array.from(new Set(
@@ -623,10 +629,10 @@ function normalizeBananaModelCapabilities(input: unknown): BananaModelCapability
           .filter(Boolean),
       )),
       supportsReferenceImages: record.supportsReferenceImages === true,
-      costs,
+      ...(cost === undefined ? {} : { cost }),
     });
   }
-  return Array.from(byModel.values()).sort((left, right) => left.model.localeCompare(right.model));
+  return capabilities;
 }
 
 function normalizeBananaConfig(input?: Partial<BananaEndpointConfig> | null): BananaEndpointConfig {
@@ -642,7 +648,9 @@ function normalizeBananaConfig(input?: Partial<BananaEndpointConfig> | null): Ba
     generationPathPrefix: generationPathPrefix || defaults.generationPathPrefix,
     supportsTextToImage: input?.supportsTextToImage !== false,
     supportsImageToImage: input?.supportsImageToImage !== false,
-    modelCapabilities: normalizeBananaModelCapabilities(input?.modelCapabilities),
+    modelCapabilities: input?.modelCapabilities === undefined
+      ? defaults.modelCapabilities
+      : normalizeBananaModelCapabilities(input.modelCapabilities),
   };
 }
 
@@ -745,10 +753,9 @@ function defaultTestPreset(kind: ConsoleUpstreamKind): UpstreamTestPreset {
   if (kind === 'banana_endpoint') {
     return {
       operation: 'generations',
-      model: 'gemini-2.5-flash-image',
+      model: BANANA_MODELS[0].id,
       prompt: DEFAULT_TEST_PROMPT,
-      size: '1K',
-      referenceImageUrl: DEFAULT_TEST_REFERENCE_IMAGE_URL,
+      size: '4K',
     };
   }
   if (kind === 'responses_endpoint') {
@@ -938,22 +945,30 @@ function normalizeOptionalEndpointUrl(value: unknown) {
 
 function normalizeBananaImagePricingMatrix(input?: unknown): BananaImageSellPriceRow[] {
   const source = Array.isArray(input) ? input : [];
-  const byKey = new Map<string, BananaImageSellPriceRow>();
+  const directPriceByModel = new Map<BananaModelId, number>();
+  const legacyPricesByModel = new Map<BananaModelId, number[]>();
   for (const item of source) {
     if (!item || typeof item !== 'object') continue;
     const record = item as Record<string, unknown>;
     const model = String(record.model || '').trim();
-    const imageSize = String(record.imageSize || '').trim().toLowerCase();
-    if (!model || (imageSize !== '1k' && imageSize !== '2k' && imageSize !== '4k')) continue;
-    byKey.set(`${model}:${imageSize}`, {
-      model,
-      imageSize,
-      price: Math.max(0, Number(record.price || 0)),
-    });
+    if (!isBananaModelId(model)) continue;
+    const price = Number(record.price);
+    if (!Number.isFinite(price) || price < 0) continue;
+    if (record.imageSize === undefined) {
+      directPriceByModel.set(model, price);
+      continue;
+    }
+    const values = legacyPricesByModel.get(model) || [];
+    values.push(price);
+    legacyPricesByModel.set(model, values);
   }
-  return Array.from(byKey.values()).sort((left, right) => (
-    left.model.localeCompare(right.model) || left.imageSize.localeCompare(right.imageSize)
-  ));
+  return BANANA_MODELS.map((model) => {
+    const legacyDistinct = Array.from(new Set(legacyPricesByModel.get(model.id) || []));
+    return {
+      model: model.id,
+      price: directPriceByModel.get(model.id) ?? (legacyDistinct.length === 1 ? legacyDistinct[0] : 0),
+    };
+  });
 }
 
 function normalizeProbeBaseCandidates(input: string) {
@@ -973,6 +988,31 @@ function normalizeUrlPath(baseUrl: string, pathOrUrl: string) {
     return pathOrUrl.startsWith('/') ? pathOrUrl : `/${pathOrUrl}`;
   }
   return raw;
+}
+
+function buildBananaProbeEndpoint(baseUrl: string, model: string) {
+  const base = normalizeBaseUrl(baseUrl);
+  const encodedModel = encodeURIComponent(model);
+  if (!base || !encodedModel) {
+    return base;
+  }
+  if (/:generateContent(?:\?|$)/i.test(base)) {
+    return base;
+  }
+  const prefix = '/v1beta/models';
+  const pathBase = base.endsWith(prefix) ? base : `${base}${prefix}`;
+  return `${pathBase}/${encodedModel}:generateContent`;
+}
+
+function bananaInlineDataFromDataUrl(value: unknown) {
+  const match = String(value || '').trim().match(/^data:([^;,]+);base64,([A-Za-z0-9+/=\s]+)$/i);
+  if (!match) {
+    return null;
+  }
+  return {
+    mimeType: match[1],
+    data: match[2].replace(/\s+/g, ''),
+  };
 }
 
 function mergeProbeBody(base: Record<string, unknown>, extra?: Record<string, unknown>) {
@@ -2116,7 +2156,7 @@ function buildProbeCandidates(baseCandidate: string, input: ProbeBuilderInput): 
       : targetKind === 'responses_endpoint'
         ? 'gpt-5.4-mini'
         : targetKind === 'banana_endpoint'
-          ? 'gemini-2.5-flash-image'
+          ? BANANA_MODELS[0].id
           : 'gpt-image-2'
   );
   const imageModel = input.imageModel || 'gpt-image-2';
@@ -2126,13 +2166,14 @@ function buildProbeCandidates(baseCandidate: string, input: ProbeBuilderInput): 
 
   if (targetKind === 'banana_endpoint') {
     const prompt = String(input.prompt || DEFAULT_TEST_PROMPT).trim() || DEFAULT_TEST_PROMPT;
-    const imageSize = String(input.size || '1K').trim().toUpperCase();
-    return [{
+    const imageSize = String(input.size || '4K').trim().toUpperCase();
+    const endpoint = buildBananaProbeEndpoint(baseCandidate, model);
+    const candidates: ProbeCandidate[] = [{
       key: `banana_post:${baseCandidate}`,
-      label: 'Banana / Gemini generateContent POST',
+      label: 'Banana 文生图 generateContent POST',
       method: 'POST',
-      baseUrl: baseCandidate,
-      path: `/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+      baseUrl: endpoint,
+      path: '',
       body: mergeProbeBody({
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         generationConfig: {
@@ -2142,6 +2183,25 @@ function buildProbeCandidates(baseCandidate: string, input: ProbeBuilderInput): 
       }, customBodyFields),
       requireImageOutput: true,
     }];
+    const inlineData = bananaInlineDataFromDataUrl(input.referenceImageDataUrl);
+    if (inlineData) {
+      candidates.push({
+        key: `banana_post_edit:${baseCandidate}`,
+        label: 'Banana 图生图 generateContent POST',
+        method: 'POST',
+        baseUrl: endpoint,
+        path: '',
+        body: mergeProbeBody({
+          contents: [{ role: 'user', parts: [{ text: prompt }, { inlineData }] }],
+          generationConfig: {
+            responseModalities: ['TEXT', 'IMAGE'],
+            imageConfig: { aspectRatio: '1:1', imageSize },
+          },
+        }, customBodyFields),
+        requireImageOutput: true,
+      });
+    }
+    return candidates;
   }
 
   if (targetKind === 'responses_endpoint') {
@@ -2532,6 +2592,7 @@ function buildDetectedUpstreamDraft(
   const imagesChecks = probe.checks.filter((item) => item.key.includes('images_'));
   const responsesChecks = probe.checks.filter((item) => item.key.includes('responses_'));
   const chatChecks = probe.checks.filter((item) => item.key.includes('chat_'));
+  const bananaChecks = probe.checks.filter((item) => item.key.includes('banana_'));
 
   const preset = buildOnboardingPreset(input, kind);
   const customBodyFields = input.customBodyFields && Object.keys(input.customBodyFields).length
@@ -2581,15 +2642,19 @@ function buildDetectedUpstreamDraft(
         supportsVisionInput: Boolean(input.referenceImageUrl) && chatChecks.some((item) => item.key.includes('chat_post') && item.exists),
       }
     : undefined;
+  const bananaTextSupported = bananaChecks.some((item) => item.key.includes('banana_post:') && item.ok);
+  const bananaImageSupported = bananaChecks.some((item) => item.key.includes('banana_post_edit:') && item.ok);
   const bananaConfig = kind === 'banana_endpoint'
     ? normalizeBananaConfig({
-        modelCapabilities: [{
+        supportsTextToImage: bananaTextSupported,
+        supportsImageToImage: bananaImageSupported,
+        authMode: 'both',
+        modelCapabilities: isBananaModelId(preset.model) ? [{
           model: preset.model,
-          imageSizes: ['1k', '2k', '4k'],
+          imageSizes: normalizeBananaImageSizes([String(preset.size || '').toLowerCase()]),
           aspectRatios: ['1:1'],
-          supportsReferenceImages: false,
-          costs: {},
-        }],
+          supportsReferenceImages: bananaImageSupported,
+        }] : [],
       })
     : undefined;
 

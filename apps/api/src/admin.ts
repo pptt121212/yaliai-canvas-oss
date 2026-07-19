@@ -5,6 +5,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import {
+  isBananaModelId,
   type OpenAIImagesRequest,
   type ProviderConfig,
   type ProviderRoutingMode,
@@ -163,9 +164,11 @@ const imageSellPriceRowSchema = z.object({
   quality: imageQualityTierSchema,
   price: z.number().nonnegative(),
 });
+const bananaModelIdSchema = z.string().trim().refine(isBananaModelId, {
+  message: 'Unsupported Banana model.',
+});
 const bananaImageSellPriceRowSchema = z.object({
-  model: z.string().trim().min(1).max(240),
-  imageSize: z.enum(['1k', '2k', '4k']),
+  model: bananaModelIdSchema,
   price: z.number().nonnegative(),
 });
 const healthStatusSchema = z.preprocess((value) => {
@@ -220,22 +223,18 @@ const chatConfigSchema = z.object({
   upstreamCostYuan: z.number().nonnegative().optional(),
 });
 const bananaModelCapabilitySchema = z.object({
-  model: z.string().trim().min(1).max(240),
+  model: bananaModelIdSchema,
   imageSizes: z.array(bananaImageSizeSchema),
   aspectRatios: z.array(z.string().trim().min(1).max(32)),
   supportsReferenceImages: z.boolean(),
-  costs: z.object({
-    '1k': z.number().nonnegative().optional(),
-    '2k': z.number().nonnegative().optional(),
-    '4k': z.number().nonnegative().optional(),
-  }).partial().optional(),
+  cost: z.number().nonnegative().optional(),
 });
 const bananaConfigSchema = z.object({
   authMode: z.enum(['x_goog_api_key', 'bearer', 'both']),
   supportsTextToImage: z.boolean(),
   supportsImageToImage: z.boolean(),
   generationPathPrefix: z.string().trim().optional(),
-  modelCapabilities: z.array(bananaModelCapabilitySchema),
+  modelCapabilities: z.array(bananaModelCapabilitySchema).length(1),
 });
 const probeCheckSchema = z.object({
   key: z.string(),
@@ -664,7 +663,7 @@ const consoleApiKeySchema = z.object({
   fixedImageFlatPrice: z.number().nonnegative().optional(),
   maxImageQuality: imageQualityCapSchema.optional(),
   downstreamImageApiType: downstreamImageApiTypeSchema.optional(),
-  bananaAllowedModels: z.array(z.string().trim().min(1).max(240)).optional(),
+  bananaAllowedModels: z.array(bananaModelIdSchema).optional(),
   bananaAllowedImageSizes: z.array(bananaImageSizeSchema).optional(),
   maskedKey: z.string().min(1),
   rawKey: z.string().optional(),
@@ -2520,15 +2519,13 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     const body = imagePricingMatrixSchema.parse(request.body);
     const bananaPricingKeys = body.bananaRows || [];
     const duplicateBananaPricingKey = bananaPricingKeys.find((row, index) => (
-      bananaPricingKeys.findIndex((candidate) => (
-        candidate.model === row.model && candidate.imageSize === row.imageSize
-      )) !== index
+      bananaPricingKeys.findIndex((candidate) => candidate.model === row.model) !== index
     ));
     if (duplicateBananaPricingKey) {
       reply.code(422);
       return {
         error: 'duplicate_banana_pricing_key',
-        message: `Duplicate Banana pricing key: ${duplicateBananaPricingKey.model} / ${duplicateBananaPricingKey.imageSize.toUpperCase()}.`,
+        message: `Duplicate Banana pricing model: ${duplicateBananaPricingKey.model}.`,
       };
     }
     return adminConsoleCatalogStore.updateAsync((catalog) => ({
@@ -3200,7 +3197,7 @@ async function buildUpstreamTestRequestPlan(upstream: ConsoleUpstream, input: z.
       model: input.model,
       prompt: input.prompt,
       size: imageSize,
-      image: input.referenceImageUrl,
+      image: input.operation === 'edits' ? input.referenceImageUrl : undefined,
       extra_body: {
         banana_protocol: true,
         banana_image_size: imageSize,
