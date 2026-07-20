@@ -71,6 +71,9 @@ export type ProviderRuntimeState = {
   recoveryScoreFloor?: number;
   lastCheckedAt?: number;
   lastSelectedAt?: number;
+  // Last real upstream result that is allowed to influence health scoring.
+  // Reads derive time-decayed values from this timestamp without persisting.
+  lastHealthEvidenceAt?: number;
   lastSuccessAt?: number;
   lastFailureAt?: number;
   failureCount?: number;
@@ -84,6 +87,10 @@ export type ProviderRuntimeState = {
   // Only successful requests with usable output contribute to this metric.
   ewmaSuccessLatencyMs?: number;
   ewmaLatencyMs?: number;
+  // Read-only diagnostics derived from the persisted evidence timestamp.
+  healthEvidenceAgeMs?: number;
+  healthEvidenceFreshness?: number;
+  successLatencyFreshness?: number;
   lastErrorCategory?: string;
   lastErrorMessage?: string;
   lastHttpStatus?: number;

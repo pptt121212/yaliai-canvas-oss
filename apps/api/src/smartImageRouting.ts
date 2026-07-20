@@ -1,5 +1,6 @@
 import {
   resolveProviderRuntimeForRead,
+  providerRuntimeEvidenceFreshness,
   supportedImagesEditProtocols,
   type OpenAIImagesEditProtocol,
   type ProviderConfig,
@@ -51,6 +52,9 @@ export type SmartImageRoutingCandidate = {
   observedLatencyMs?: number;
   latencySource: 'success_ewma' | 'legacy_ewma' | 'candidate_median';
   successLatencySampleCount: number;
+  healthEvidenceAgeMs: number;
+  healthEvidenceFreshness: number;
+  successLatencyFreshness: number;
   qualityScore: number;
   healthScore: number;
   concurrencyScore: number;
@@ -696,23 +700,31 @@ function medianPositive(values: number[]) {
 function measuredSuccessLatency(provider: ProviderConfig): {
   latencyMs?: number;
   sampleCount: number;
+  freshness: number;
   source: 'success_ewma' | 'legacy_ewma' | 'candidate_median';
 } {
   const runtime = provider.metadata?.runtime as {
     ewmaSuccessLatencyMs?: unknown;
     ewmaLatencyMs?: unknown;
     successCount?: unknown;
+    lastSuccessAt?: unknown;
+    successLatencyFreshness?: unknown;
   } | undefined;
   const successLatencyMs = Number(runtime?.ewmaSuccessLatencyMs || 0);
   const legacyLatencyMs = Number(runtime?.ewmaLatencyMs || 0);
   const sampleCount = Math.max(0, Number(runtime?.successCount || 0));
   const hasSuccessLatency = Number.isFinite(successLatencyMs) && successLatencyMs > 0;
   const hasLegacyLatency = Number.isFinite(legacyLatencyMs) && legacyLatencyMs > 0;
+  const runtimeFreshness = Number(runtime?.successLatencyFreshness);
+  const freshness = Number.isFinite(runtimeFreshness)
+    ? Math.max(0, Math.min(1, runtimeFreshness))
+    : providerRuntimeEvidenceFreshness(runtime?.lastSuccessAt);
   return {
     latencyMs: hasSuccessLatency
       ? successLatencyMs
       : (hasLegacyLatency ? legacyLatencyMs : undefined),
     sampleCount: Number.isFinite(sampleCount) ? Math.floor(sampleCount) : 0,
+    freshness,
     source: hasSuccessLatency ? 'success_ewma' : (hasLegacyLatency ? 'legacy_ewma' : 'candidate_median'),
   };
 }
@@ -824,7 +836,7 @@ export async function buildSmartImageRoutingPlan(input: {
     const latencyConfidence = Math.min(
       1,
       candidate.successLatency.sampleCount / SUCCESS_LATENCY_WARMUP_SAMPLES,
-    );
+    ) * candidate.successLatency.freshness;
     const estimatedLatencyMs = candidate.successLatency.latencyMs
       ? candidate.successLatency.latencyMs * latencyConfidence
         + estimatedLatencyFallbackMs * (1 - latencyConfidence)
@@ -855,6 +867,9 @@ export async function buildSmartImageRoutingPlan(input: {
         `success_latency_ms=${candidate.successLatency.latencyMs ? Math.round(candidate.successLatency.latencyMs) : 'fallback'}`,
         `success_latency_source=${candidate.successLatency.source}`,
         `success_latency_samples=${candidate.successLatency.sampleCount}`,
+        `success_latency_freshness=${candidate.successLatency.freshness.toFixed(4)}`,
+        `health_evidence_age_ms=${Math.round(Number((candidate.provider.metadata?.runtime as { healthEvidenceAgeMs?: unknown } | undefined)?.healthEvidenceAgeMs || 0))}`,
+        `health_evidence_freshness=${Number((candidate.provider.metadata?.runtime as { healthEvidenceFreshness?: unknown } | undefined)?.healthEvidenceFreshness || 1).toFixed(4)}`,
         `success_latency_confidence=${latencyConfidence.toFixed(4)}`,
         `estimated_success_latency_ms=${Math.round(estimatedLatencyMs)}`,
         `delivery_value_index=${deliveryEconomics.deliveryValueIndex.toFixed(2)}`,
@@ -875,6 +890,9 @@ export async function buildSmartImageRoutingPlan(input: {
       observedLatencyMs: candidate.successLatency.latencyMs,
       latencySource: candidate.successLatency.source,
       successLatencySampleCount: candidate.successLatency.sampleCount,
+      healthEvidenceAgeMs: Math.max(0, Number((candidate.provider.metadata?.runtime as { healthEvidenceAgeMs?: unknown } | undefined)?.healthEvidenceAgeMs || 0)),
+      healthEvidenceFreshness: Math.max(0, Math.min(1, Number((candidate.provider.metadata?.runtime as { healthEvidenceFreshness?: unknown } | undefined)?.healthEvidenceFreshness || 1))),
+      successLatencyFreshness: candidate.successLatency.freshness,
       qualityScore: candidate.accuracyScore,
       healthScore: candidate.healthScore,
       concurrencyScore: candidate.concurrencyScore,

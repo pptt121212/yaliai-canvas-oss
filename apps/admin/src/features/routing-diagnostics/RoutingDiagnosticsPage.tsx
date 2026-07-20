@@ -172,7 +172,8 @@ function readableScoreReason(record: RoutingCandidate) {
     .filter(Boolean);
   return [
     `健康 ${formatScore(record.healthScore)} 是主要依据`,
-    `预计成功出图 ${formatDuration(record.estimatedLatencyMs)}（成功样本 ${record.successLatencySampleCount}）`,
+    `健康证据距今 ${formatDuration(record.healthEvidenceAgeMs)}，有效权重 ${(record.healthEvidenceFreshness * 100).toFixed(0)}%`,
+    `预计成功出图 ${formatDuration(record.estimatedLatencyMs)}（成功样本 ${record.successLatencySampleCount}，延时置信 ${(record.successLatencyFreshness * 100).toFixed(0)}%）`,
     `成本 ${formatPrice(record.price)} / 中位数 ${formatPrice(record.costMedian)} / 指数 ${record.costIndex.toFixed(2)}`,
     `交付指数 ${record.deliveryValueIndex.toFixed(1)}`,
     `并发 ${record.currentConcurrency}`,
@@ -633,8 +634,8 @@ function renderRoutingOverviewFlow() {
           {renderMetrics([
             { label: 'provider 并发', value: '默认 10，可按线路配置' },
             { label: '请求超时', value: '默认 180 秒' },
-            { label: '优选/固定', value: '首条失败即停止' },
-            { label: '智能模式', value: 'shouldFailover=true 时回退' },
+            { label: '优选/单固定', value: '首条失败即停止' },
+            { label: '智能/固定线路池', value: 'shouldFailover=true 时回退' },
           ])}
           <div className="routing-graph__detail-grid routing-graph__detail-grid--triple">
             <div className="routing-graph__panel">
@@ -642,6 +643,7 @@ function renderRoutingOverviewFlow() {
               <ul className="routing-graph__list">
                 <li>检查该 provider 当前并发是否还有槽位。</li>
                 <li>占满时记为 `retryable_overloaded`，且 `affectsHealth=false`。</li>
+                <li>解除冷却且旧技术失败已衰减的线路，最多每 30 分钟获得一次真实再入验证；必须存在其他回退线路。</li>
                 <li>随后按该线路配置超时发起真实上游请求。</li>
               </ul>
             </div>
@@ -665,7 +667,7 @@ function renderRoutingOverviewFlow() {
           </div>
           <div className="routing-graph__loop">
             <strong>回退闭环：</strong>
-            仅当 <code>mode = smart_failover</code> 且 <code>shouldFailover = true</code> 时，才会回到“下一候选”继续尝试；优选模式和固定模式不会进入这个循环。
+            <code>smart_failover</code> 与多选固定线路池在 <code>shouldFailover = true</code> 时会回到“下一候选”；优选和单条固定线路不会进入这个循环。
           </div>
         </section>
 
@@ -711,7 +713,9 @@ function renderRoutingOverviewFlow() {
             <div className="routing-graph__panel is-warning">
               <strong>3. 健康状态回写</strong>
               <ul className="routing-graph__list">
-                <li>成功率、延迟、连续失败、冷却/熔断状态会写回 hot state。</li>
+                <li>成功率、延迟、连续失败、冷却/熔断状态会写回共享 hot state。</li>
+                <li>读取候选时，旧技术失败和旧延时会按时间衰减到中性；不会产生探活请求或改写原始证据。</li>
+                <li>已恢复线路通过受控真实再入成功后，才会用新数据重新获得正常排序资格。</li>
                 <li>Redis 可用时共享到多进程；不可用时回退内存快照。</li>
                 <li>这批运行态会直接影响下一次请求的候选过滤与排序。</li>
                 <li>业务通道和总览中的生成成功率，另按“成功 / 计入成功率请求”计算，并单独剔除拒绝类失败。</li>
@@ -720,7 +724,7 @@ function renderRoutingOverviewFlow() {
           </div>
           <div className="routing-graph__loopback">
             <strong>最终闭环：</strong>
-            本次请求写回的运行态健康、冷却窗口、并发快照与分辨率稳定度，会在下一次进入 <strong>C 节点候选预览</strong> 时被重新读取，这就是完整的智能路由自反馈闭环。
+            本次请求写回的运行态健康、冷却窗口、并发快照与分辨率稳定度，会在下一次进入 <strong>C 节点候选预览</strong> 时被重新读取；旧证据随时间被动恢复，恢复线路再由一笔受控真实请求验证，构成完整自反馈闭环。
           </div>
         </section>
       </div>
@@ -778,7 +782,7 @@ export function RoutingDiagnosticsPage({ report }: RoutingDiagnosticsPageProps) 
                       使用与智能相同的智能评分排序，但只请求当前首选线路，不做后续回退。
                     </Descriptions.Item>
                     <Descriptions.Item label="固定">
-                      只使用密钥绑定的固定线路；如果该线路禁用、冷却或能力不匹配，请求直接失败，不切换到其他线路。
+                      只使用密钥绑定的固定线路；单选首条失败即停止，多选固定线路池会在池内智能排序并对可回退失败继续切换，绝不使用池外线路。
                     </Descriptions.Item>
                   </Descriptions>
                 </Card>

@@ -513,6 +513,9 @@ export type RoutingDiagnosticsPreviewPlan = {
     observedLatencyMs?: number;
     latencySource: 'success_ewma' | 'legacy_ewma' | 'candidate_median';
     successLatencySampleCount: number;
+    healthEvidenceAgeMs: number;
+    healthEvidenceFreshness: number;
+    successLatencyFreshness: number;
     costMedian: number;
     effectiveCost: number;
     costIndex: number;

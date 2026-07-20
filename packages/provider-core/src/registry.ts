@@ -13,6 +13,8 @@ type RegistryStore = {
 const DEFAULT_EWMA_SUCCESS_RATE = 0.8;
 const DEFAULT_EWMA_ALPHA = 0.3;
 const DEFAULT_LATENCY_ALPHA = 0.25;
+const PASSIVE_RECOVERY_DECAY_STEP_MS = 10 * 60 * 1000;
+const PASSIVE_RECOVERY_DECAY_FACTOR = 0.8;
 const SLOW_REQUEST_MS = 120_000;
 const FUSE_AUTH_MS = 60 * 60 * 1000;
 const FUSE_REPEATED_FAILURE_MS = 30 * 60 * 1000;
@@ -36,6 +38,53 @@ function ewma(previous: number, next: number, alpha: number) {
   return alpha * next + (1 - alpha) * previous;
 }
 
+export function providerRuntimeEvidenceFreshness(lastEvidenceAt: unknown, now = Date.now()) {
+  const observedAt = Number(lastEvidenceAt || 0);
+  if (!Number.isFinite(observedAt) || observedAt <= 0 || observedAt >= now) {
+    return 1;
+  }
+  const ageMs = now - observedAt;
+  return clampNumber(Math.pow(PASSIVE_RECOVERY_DECAY_FACTOR, ageMs / PASSIVE_RECOVERY_DECAY_STEP_MS), 0, 1);
+}
+
+function runtimeHealthEvidenceAt(runtime: ProviderRuntimeState) {
+  const explicitEvidenceAt = Number(runtime.lastHealthEvidenceAt || 0);
+  if (Number.isFinite(explicitEvidenceAt) && explicitEvidenceAt > 0) {
+    return explicitEvidenceAt;
+  }
+  return Math.max(
+    Number(runtime.lastSuccessAt || 0),
+    Number(runtime.lastFailureAt || 0),
+    Number(runtime.lastCheckedAt || 0),
+  );
+}
+
+function applyPassiveRecoveryEvidence(runtime: ProviderRuntimeState, now: number) {
+  const evidenceAt = runtimeHealthEvidenceAt(runtime);
+  const freshness = providerRuntimeEvidenceFreshness(evidenceAt, now);
+  const ageMs = evidenceAt > 0 ? Math.max(0, now - evidenceAt) : 0;
+  runtime.healthEvidenceAgeMs = ageMs;
+  runtime.healthEvidenceFreshness = freshness;
+  runtime.successLatencyFreshness = providerRuntimeEvidenceFreshness(runtime.lastSuccessAt, now);
+  if (freshness >= 1) {
+    return runtime;
+  }
+
+  // Time only returns stale evidence to neutral. It never fabricates a high
+  // success rate or a fast latency for a provider that has not been used.
+  runtime.ewmaSuccessRate = clampNumber(
+    DEFAULT_EWMA_SUCCESS_RATE
+      + (Number(runtime.ewmaSuccessRate || DEFAULT_EWMA_SUCCESS_RATE) - DEFAULT_EWMA_SUCCESS_RATE) * freshness,
+    0,
+    1,
+  );
+  runtime.ewmaLatencyMs = Math.max(0, Math.round(Number(runtime.ewmaLatencyMs || 0) * freshness));
+  runtime.consecutiveFailures = Math.max(0, Number(runtime.consecutiveFailures || 0) * freshness);
+  runtime.consecutiveTimeouts = Math.max(0, Number(runtime.consecutiveTimeouts || 0) * freshness);
+  runtime.consecutiveSlowRequests = Math.max(0, Number(runtime.consecutiveSlowRequests || 0) * freshness);
+  return runtime;
+}
+
 function normalizeRuntimeState(runtime: ProviderRuntimeState | undefined, config: ProviderConfig): ProviderRuntimeState {
   const baseHealthScore = Number(config.healthScore || 100);
   return {
@@ -48,6 +97,7 @@ function normalizeRuntimeState(runtime: ProviderRuntimeState | undefined, config
     recoveryScoreFloor: runtime?.recoveryScoreFloor,
     lastCheckedAt: runtime?.lastCheckedAt,
     lastSelectedAt: runtime?.lastSelectedAt,
+    lastHealthEvidenceAt: runtime?.lastHealthEvidenceAt,
     lastSuccessAt: runtime?.lastSuccessAt,
     lastFailureAt: runtime?.lastFailureAt,
     failureCount: Math.max(0, Number(runtime?.failureCount || 0)),
@@ -106,6 +156,7 @@ export function resolveProviderRuntimeForRead(
   now = Date.now(),
 ): ProviderRuntimeState {
   const next = normalizeRuntimeState(runtime, config);
+  applyPassiveRecoveryEvidence(next, now);
   const cooldownExpired = Boolean(next.cooldownUntil && next.cooldownUntil <= now);
   const fusedExpired = Boolean(next.fusedUntil && next.fusedUntil <= now);
   const hasActiveBlock = Boolean(
@@ -349,10 +400,12 @@ export function computeProviderRuntimeAfterAttempt(
   const config = normalizeProvider(provider);
   const now = report.failedAt || Date.now();
   const runtime = normalizeRuntimeState(currentRuntime || readSeedRuntime(config), config);
+  applyPassiveRecoveryEvidence(runtime, now);
   runtime.lastSelectedAt = now;
   runtime.lastCheckedAt = now;
   if (report.ok) {
     const latencyMs = Math.max(0, Number(report.latencyMs || 0));
+    const previousSuccessAt = runtime.lastSuccessAt;
     runtime.lastSuccessAt = now;
     runtime.successCount = Math.max(0, Number(runtime.successCount || 0)) + 1;
     runtime.consecutiveFailures = 0;
@@ -368,8 +421,10 @@ export function computeProviderRuntimeAfterAttempt(
     runtime.ewmaLatencyMs = latencyMs > 0
       ? Math.round(ewma(Number(runtime.ewmaLatencyMs || latencyMs), latencyMs, DEFAULT_LATENCY_ALPHA))
       : Number(runtime.ewmaLatencyMs || 0);
+    const staleLatencyAlpha = 1 - (1 - DEFAULT_LATENCY_ALPHA)
+      * providerRuntimeEvidenceFreshness(previousSuccessAt, now);
     runtime.ewmaSuccessLatencyMs = latencyMs > 0
-      ? Math.round(ewma(Number(runtime.ewmaSuccessLatencyMs || latencyMs), latencyMs, DEFAULT_LATENCY_ALPHA))
+      ? Math.round(ewma(Number(runtime.ewmaSuccessLatencyMs || latencyMs), latencyMs, staleLatencyAlpha))
       : Number(runtime.ewmaSuccessLatencyMs || 0);
     runtime.cooldownUntil = undefined;
     runtime.fusedUntil = undefined;
@@ -380,6 +435,7 @@ export function computeProviderRuntimeAfterAttempt(
     runtime.lastErrorCategory = '';
     runtime.lastErrorMessage = '';
     runtime.lastHttpStatus = Math.max(0, Number(report.statusCode || 0));
+    runtime.lastHealthEvidenceAt = now;
     runtime.healthScore = deriveRuntimeHealthScore(runtime, config, now);
     return runtime;
   }
@@ -406,6 +462,7 @@ export function computeProviderRuntimeAfterAttempt(
     : Number(runtime.ewmaLatencyMs || 0);
 
   if (governance.countsAsHealthFailure) {
+    runtime.lastHealthEvidenceAt = now;
     runtime.failureCount = Math.max(0, Number(runtime.failureCount || 0)) + 1;
     runtime.consecutiveFailures = Math.max(0, Number(runtime.consecutiveFailures || 0)) + 1;
   }

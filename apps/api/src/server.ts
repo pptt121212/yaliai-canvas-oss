@@ -37,6 +37,10 @@ import {
 import { resolveImageCapabilityCost } from './modules/imageCapabilityMatrix.js';
 import { dynamicOverloadGuard } from './modules/runtime/dynamicOverloadGuard.js';
 import { gatewayInstanceId } from './modules/runtime/gatewayIdentity.js';
+import {
+  isPassiveRecoveryReentryProvider,
+  passiveRecoveryReentryIntervalSeconds,
+} from './modules/routing/passiveRecovery.js';
 import { startOperationalRollupScheduler } from './modules/operationalRollups.js';
 import {
   appendAuditRecord,
@@ -3979,6 +3983,65 @@ function waitBeforeSoleProviderRetry(retryAttempt: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, delayMs));
 }
 
+async function claimPassiveRecoveryReentry(providerId: string) {
+  const key = `provider:${providerId}:passive-recovery-reentry`;
+  if (hotStateAtomicCounters) {
+    try {
+      return (await hotStateAtomicCounters.acquireConcurrency(key, 1, passiveRecoveryReentryIntervalSeconds)).allowed;
+    } catch (error) {
+      if (sharedHotStateStrict) {
+        throw createSharedHotStateUnavailableError('passive_recovery_reentry_claim');
+      }
+      requestLogWarn('redis_passive_recovery_reentry_claim_fallback', error);
+    }
+  }
+  // Keep the lease until TTL expiry. It is a frequency gate, not in-flight concurrency.
+  return concurrencyService.acquire(key, 1, passiveRecoveryReentryIntervalSeconds).allowed;
+}
+
+async function promotePassiveRecoveryReentry(input: {
+  mode: EffectiveRoutingMode;
+  asyncRequest: boolean;
+  plan: SmartImageRoutingPlan;
+  candidates: RoutedImageExecutionCandidate[];
+}) {
+  if (
+    input.asyncRequest
+    || (input.mode !== 'smart_failover' && input.mode !== 'fixed_provider_pool')
+    || input.candidates.length < 2
+  ) {
+    return;
+  }
+  const eligible = input.candidates
+    .map((candidate, index) => ({ candidate, index }))
+    .filter((item) => item.index > 0 && isPassiveRecoveryReentryProvider(item.candidate.provider))
+    .sort((left, right) => {
+      const leftAge = Number((left.candidate.provider.metadata?.runtime as { healthEvidenceAgeMs?: unknown } | undefined)?.healthEvidenceAgeMs || 0);
+      const rightAge = Number((right.candidate.provider.metadata?.runtime as { healthEvidenceAgeMs?: unknown } | undefined)?.healthEvidenceAgeMs || 0);
+      return rightAge - leftAge || left.index - right.index;
+    });
+
+  for (const item of eligible) {
+    if (!await claimPassiveRecoveryReentry(item.candidate.provider.providerId)) {
+      continue;
+    }
+    const reentryReason = 'passive_recovery_reentry';
+    item.candidate.reasons = [...(item.candidate.reasons || []), reentryReason];
+    input.candidates.splice(item.index, 1);
+    input.candidates.unshift(item.candidate);
+
+    const planIndex = input.plan.candidates.findIndex((candidate) => candidate.provider.providerId === item.candidate.provider.providerId);
+    if (planIndex >= 0) {
+      const [planCandidate] = input.plan.candidates.splice(planIndex, 1);
+      if (planCandidate) {
+        planCandidate.reasons.push(reentryReason);
+        input.plan.candidates.unshift(planCandidate);
+      }
+    }
+    return;
+  }
+}
+
 function buildApiKeyConcurrencyKey(accessContext: RequestAccessContext) {
   if (accessContext.authMode !== 'tenant_key' || !accessContext.apiKeyId) {
     return null;
@@ -5328,6 +5391,13 @@ async function buildSmartExecutionPreview(input: {
       });
     }
   }
+
+  await promotePassiveRecoveryReentry({
+    mode,
+    asyncRequest: Boolean(payload.async),
+    plan,
+    candidates,
+  });
 
   return {
     mode,
