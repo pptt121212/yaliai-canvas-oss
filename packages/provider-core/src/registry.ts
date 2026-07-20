@@ -95,6 +95,10 @@ function normalizeRuntimeState(runtime: ProviderRuntimeState | undefined, config
     recoveryStartedAt: runtime?.recoveryStartedAt,
     recoveryUntil: runtime?.recoveryUntil,
     recoveryScoreFloor: runtime?.recoveryScoreFloor,
+    recoveryCampaignStartedAt: runtime?.recoveryCampaignStartedAt,
+    recoveryCampaignAttempts: Math.max(0, Number(runtime?.recoveryCampaignAttempts || 0)),
+    recoveryCampaignSuccesses: Math.max(0, Number(runtime?.recoveryCampaignSuccesses || 0)),
+    recoveryCampaignLastAttemptAt: runtime?.recoveryCampaignLastAttemptAt,
     lastCheckedAt: runtime?.lastCheckedAt,
     lastSelectedAt: runtime?.lastSelectedAt,
     lastHealthEvidenceAt: runtime?.lastHealthEvidenceAt,
@@ -436,6 +440,21 @@ export function computeProviderRuntimeAfterAttempt(
     runtime.lastErrorMessage = '';
     runtime.lastHttpStatus = Math.max(0, Number(report.statusCode || 0));
     runtime.lastHealthEvidenceAt = now;
+    if (report.passiveRecoveryReentry) {
+      const attempts = Math.max(0, Number(runtime.recoveryCampaignAttempts || 0)) + 1;
+      const successes = Math.max(0, Number(runtime.recoveryCampaignSuccesses || 0)) + 1;
+      if (successes >= 3) {
+        runtime.recoveryCampaignStartedAt = undefined;
+        runtime.recoveryCampaignAttempts = undefined;
+        runtime.recoveryCampaignSuccesses = undefined;
+        runtime.recoveryCampaignLastAttemptAt = undefined;
+      } else {
+        runtime.recoveryCampaignStartedAt = Number(runtime.recoveryCampaignStartedAt || now);
+        runtime.recoveryCampaignAttempts = attempts;
+        runtime.recoveryCampaignSuccesses = successes;
+        runtime.recoveryCampaignLastAttemptAt = now;
+      }
+    }
     runtime.healthScore = deriveRuntimeHealthScore(runtime, config, now);
     return runtime;
   }
@@ -448,6 +467,10 @@ export function computeProviderRuntimeAfterAttempt(
   runtime.recoveryStartedAt = undefined;
   runtime.recoveryUntil = undefined;
   runtime.recoveryScoreFloor = undefined;
+  runtime.recoveryCampaignStartedAt = undefined;
+  runtime.recoveryCampaignAttempts = undefined;
+  runtime.recoveryCampaignSuccesses = undefined;
+  runtime.recoveryCampaignLastAttemptAt = undefined;
   runtime.lastFailureAt = now;
   runtime.lastErrorCategory = String(report.failureCategory || '').trim();
   runtime.lastErrorMessage = String(report.errorMessage || '').trim();

@@ -686,6 +686,7 @@ export interface AsyncOperationalRepository {
   upsertTask(record: TaskMasterRecord): Promise<TaskMasterRecord>;
   getTask(taskId: string): Promise<TaskMasterRecord | null>;
   listTasks(limit: number): Promise<TaskMasterRecord[]>;
+  listTasksForRoutingAccuracy(limit: number): Promise<TaskMasterRecord[]>;
   getRoutingAccuracySnapshot(snapshotKey: string): Promise<RoutingAccuracySnapshotRecord | null>;
   upsertRoutingAccuracySnapshot(record: RoutingAccuracySnapshotRecord): Promise<RoutingAccuracySnapshotRecord>;
 }

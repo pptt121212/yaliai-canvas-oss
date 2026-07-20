@@ -130,6 +130,8 @@ const accuracySnapshotRefreshMs = Math.max(
   60 * 60 * 1000,
   Number(process.env.SMART_ROUTING_ACCURACY_SNAPSHOT_MS || 5 * 24 * 60 * 60 * 1000),
 );
+const accuracySnapshotRefreshLockMs = 10 * 60 * 1000;
+const accuracySnapshotRefreshJobKey = `routing_accuracy_snapshot:${accuracySnapshotKey}`;
 const accuracySnapshotCache = new Map<string, {
   expiresAt: number;
   value: AccuracySnapshotIndex;
@@ -138,7 +140,23 @@ let persistedAccuracyReportCache: {
   expiresAt: number;
   value: ResolutionAuditReport;
 } | null = null;
-let accuracySnapshotRefreshPromise: Promise<ResolutionAuditReport> | null = null;
+let accuracySnapshotRefreshPromise: Promise<ResolutionAuditReport | null> | null = null;
+
+function emptyResolutionAccuracyReport(): ResolutionAuditReport {
+  return {
+    generatedAt: 0,
+    sampleWindowSize: 0,
+    totals: {
+      sampleCount: 0,
+      measuredCount: 0,
+      upstreamCount: 0,
+      exactRequestGroupCount: 0,
+      aspectGroupCount: 0,
+    },
+    rows: [],
+    aspectRows: [],
+  };
+}
 
 function accuracyCacheKey(context: ImageRoutingRequestContext) {
   return [
@@ -487,7 +505,7 @@ function normalizeRoutingAccuracyReport(value: unknown): ResolutionAuditReport |
 
 async function rebuildRoutingAccuracyReportSnapshot() {
   const catalog = adminConsoleCatalogStore.get();
-  const tasks = await operationalRepository.listTasks(accuracySampleLimit);
+  const tasks = await operationalRepository.listTasksForRoutingAccuracy(accuracySampleLimit);
   const report = buildResolutionAuditReport(tasks, catalog);
   const now = Date.now();
   const normalizedReport = {
@@ -514,7 +532,42 @@ function refreshRoutingAccuracySnapshotInBackground() {
   if (accuracySnapshotRefreshPromise) {
     return;
   }
-  accuracySnapshotRefreshPromise = rebuildRoutingAccuracyReportSnapshot()
+  accuracySnapshotRefreshPromise = (async () => {
+    const workerId = `routing-accuracy-snapshot:${process.pid}`;
+    const claimed = await operationalRepository.tryStartOperationalRollupJob({
+      jobKey: accuracySnapshotRefreshJobKey,
+      lockMs: accuracySnapshotRefreshLockMs,
+      workerId,
+    });
+    if (!claimed) {
+      return null;
+    }
+    let success = false;
+    try {
+      // Another PM2 may have refreshed the shared snapshot immediately before
+      // this process acquired the released lease. Reuse it instead of scanning
+      // task history twice.
+      const current = await operationalRepository.getRoutingAccuracySnapshot(accuracySnapshotKey);
+      const currentReport = normalizeRoutingAccuracyReport(current?.payload);
+      if (currentReport && Number(current?.expiresAt || 0) > Date.now()) {
+        persistedAccuracyReportCache = {
+          expiresAt: Number(current?.expiresAt || 0),
+          value: currentReport,
+        };
+        success = true;
+        return currentReport;
+      }
+      const report = await rebuildRoutingAccuracyReportSnapshot();
+      success = true;
+      return report;
+    } finally {
+      await operationalRepository.finishOperationalRollupJob({
+        jobKey: accuracySnapshotRefreshJobKey,
+        workerId,
+        success,
+      });
+    }
+  })()
     .finally(() => {
       accuracySnapshotRefreshPromise = null;
     });
@@ -543,13 +596,8 @@ async function getRoutingAccuracyReportSnapshot() {
     return storedReport;
   }
 
-  if (!accuracySnapshotRefreshPromise) {
-    accuracySnapshotRefreshPromise = rebuildRoutingAccuracyReportSnapshot()
-      .finally(() => {
-        accuracySnapshotRefreshPromise = null;
-      });
-  }
-  return accuracySnapshotRefreshPromise;
+  refreshRoutingAccuracySnapshotInBackground();
+  return (await accuracySnapshotRefreshPromise) || emptyResolutionAccuracyReport();
 }
 
 function buildAccuracySnapshot(providerId: string, index: AccuracySnapshotIndex): ProviderAccuracySnapshot {
@@ -756,8 +804,10 @@ export async function buildSmartImageRoutingPlan(input: {
   mode: ImageRoutingMode;
   context: ImageRoutingRequestContext;
 }) : Promise<SmartImageRoutingPlan> {
-  await refreshHotProviderRuntime(input.providers.map((provider) => provider.providerId));
-  await refreshHotConcurrencyCounters(input.providers.map((provider) => `provider:${provider.providerId}`));
+  await Promise.all([
+    refreshHotProviderRuntime(input.providers.map((provider) => provider.providerId)),
+    refreshHotConcurrencyCounters(input.providers.map((provider) => `provider:${provider.providerId}`)),
+  ]);
   const runtimeProviders = input.providers.map(resolveProviderRuntimeForRouting);
 
   const filteredOut: SmartImageRoutingPlan['filteredOut'] = [];
@@ -794,7 +844,14 @@ export async function buildSmartImageRoutingPlan(input: {
     };
   }
 
-  const accuracyIndex = await buildAccuracySnapshotIndex(input.context);
+  // A single eligible line has no alternative to rank against. Keep its
+  // diagnostics deterministic without reading the historical accuracy report.
+  const accuracyIndex = candidateProviders.length > 1
+    ? await buildAccuracySnapshotIndex(input.context)
+    : {
+        exactRowsByProviderId: new Map<string, ResolutionAuditSummaryRow>(),
+        aspectRowsByProviderId: new Map<string, ResolutionAuditSummaryRow>(),
+      };
 
   const unrankedCandidates = candidateProviders.map((provider) => {
     const accuracy = buildAccuracySnapshot(provider.providerId, accuracyIndex);

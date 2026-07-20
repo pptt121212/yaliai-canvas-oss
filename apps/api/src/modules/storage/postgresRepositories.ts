@@ -2723,6 +2723,49 @@ export function createPostgresOperationalRepository(
         billedCredits: row.billed_credits ?? undefined,
       } satisfies TaskMasterRecord));
     },
+    async listTasksForRoutingAccuracy(limit: number) {
+      await ensureOperationalTables(pool, schema);
+      const result = await pool.query(
+        `
+          select
+            task_id, request_id, tenant_id, api_key_id, channel_id, upstream_id,
+            operation, status, provider_id, model, prompt_preview,
+            created_at, updated_at, completed_at, billed_credits,
+            case when request_payload ? 'resolutionAudit'
+              then jsonb_build_object('resolutionAudit', request_payload -> 'resolutionAudit')
+              else '{}'::jsonb end as request_payload,
+            case when response_payload ? 'resolutionAudit'
+              then jsonb_build_object('resolutionAudit', response_payload -> 'resolutionAudit')
+              else null end as response_payload
+          from ${schema}.task_master
+          order by created_at desc
+          limit $1
+        `,
+        [limit],
+      );
+      return result.rows.map((row) => ({
+        taskId: row.task_id,
+        requestId: row.request_id,
+        tenantId: row.tenant_id,
+        apiKeyId: row.api_key_id,
+        channelId: row.channel_id,
+        upstreamId: row.upstream_id ?? undefined,
+        operation: row.operation,
+        status: row.status,
+        providerId: row.provider_id ?? undefined,
+        providerSource: undefined,
+        providerBaseUrl: undefined,
+        model: row.model,
+        promptPreview: row.prompt_preview,
+        createdAt: Number(row.created_at),
+        updatedAt: Number(row.updated_at),
+        completedAt: row.completed_at ? Number(row.completed_at) : undefined,
+        requestPayload: row.request_payload || {},
+        responsePayload: row.response_payload || null,
+        errorPayload: null,
+        billedCredits: row.billed_credits ?? undefined,
+      } satisfies TaskMasterRecord));
+    },
     async getRoutingAccuracySnapshot(snapshotKey: string) {
       await ensureOperationalTables(pool, schema);
       const result = await pool.query(

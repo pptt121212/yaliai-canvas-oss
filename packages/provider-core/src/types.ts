@@ -69,6 +69,10 @@ export type ProviderRuntimeState = {
   recoveryStartedAt?: number;
   recoveryUntil?: number;
   recoveryScoreFloor?: number;
+  recoveryCampaignStartedAt?: number;
+  recoveryCampaignAttempts?: number;
+  recoveryCampaignSuccesses?: number;
+  recoveryCampaignLastAttemptAt?: number;
   lastCheckedAt?: number;
   lastSelectedAt?: number;
   // Last real upstream result that is allowed to influence health scoring.
@@ -147,6 +151,9 @@ export type ProviderAttemptReport = {
   latencyMs?: number;
   failureCategory?: string;
   errorMessage?: string;
+  // True only for a real downstream request deliberately promoted to verify
+  // stale provider health. Ordinary routed traffic must leave this unset.
+  passiveRecoveryReentry?: boolean;
 };
 
 export type OpenAIImagesOperation = 'generations' | 'edits';

@@ -55,7 +55,7 @@ const reentryProvider = {
     },
   },
 };
-assert.equal(isPassiveRecoveryReentryProvider(reentryProvider, recoveredAt), true, 'stale technical failure must become eligible for one controlled reentry');
+assert.equal(isPassiveRecoveryReentryProvider(reentryProvider, recoveredAt), true, 'stale technical failure must become eligible for recovery verification');
 assert.equal(isPassiveRecoveryReentryProvider({
   ...reentryProvider,
   metadata: { runtime: { ...reentryProvider.metadata.runtime, cooldownUntil: recoveredAt + 1 } },
@@ -66,7 +66,65 @@ assert.equal(isPassiveRecoveryReentryProvider({
 }, recoveredAt), false, 'terminal authentication failures must never reenter automatically');
 assert.equal(isPassiveRecoveryReentryProvider({
   ...reentryProvider,
+  metadata: { runtime: { ...reentryProvider.metadata.runtime, lastErrorCategory: 'retryable_upstream_quota' } },
+}, recoveredAt), false, 'upstream quota failures must never enter recovery verification');
+assert.equal(isPassiveRecoveryReentryProvider({
+  ...reentryProvider,
   metadata: { runtime: { ...reentryProvider.metadata.runtime, lastSuccessAt: recoveredAt } },
 }, recoveredAt), false, 'a newer real success ends the recovery reentry state');
+
+const firstVerification = computeProviderRuntimeAfterAttempt(provider, failed, {
+  providerId: provider.providerId,
+  ok: true,
+  statusCode: 200,
+  failedAt: recoveredAt,
+  latencyMs: 30_000,
+  affectsHealth: false,
+  passiveRecoveryReentry: true,
+});
+assert.equal(firstVerification.recoveryCampaignAttempts, 1, 'first recovery success starts the campaign');
+assert.equal(firstVerification.recoveryCampaignSuccesses, 1, 'first recovery success is recorded');
+assert.equal(isPassiveRecoveryReentryProvider({
+  ...provider,
+  metadata: { runtime: resolveProviderRuntimeForRead(firstVerification, provider, recoveredAt + 30 * 60 * 1000) },
+}, recoveredAt + 30 * 60 * 1000), true, 'a successful first verification permits the spaced second verification');
+
+const secondVerification = computeProviderRuntimeAfterAttempt(provider, firstVerification, {
+  providerId: provider.providerId,
+  ok: true,
+  statusCode: 200,
+  failedAt: recoveredAt + 30 * 60 * 1000,
+  latencyMs: 30_000,
+  affectsHealth: false,
+  passiveRecoveryReentry: true,
+});
+assert.equal(secondVerification.recoveryCampaignSuccesses, 2, 'second recovery success remains in the campaign');
+
+const completedVerification = computeProviderRuntimeAfterAttempt(provider, secondVerification, {
+  providerId: provider.providerId,
+  ok: true,
+  statusCode: 200,
+  failedAt: recoveredAt + 60 * 60 * 1000,
+  latencyMs: 30_000,
+  affectsHealth: false,
+  passiveRecoveryReentry: true,
+});
+assert.equal(completedVerification.recoveryCampaignSuccesses, undefined, 'third recovery success ends the campaign');
+assert.equal(isPassiveRecoveryReentryProvider({
+  ...provider,
+  metadata: { runtime: resolveProviderRuntimeForRead(completedVerification, provider, recoveredAt + 60 * 60 * 1000) },
+}, recoveredAt + 60 * 60 * 1000), false, 'completed campaign returns to normal ranking only');
+
+const abortedVerification = computeProviderRuntimeAfterAttempt(provider, firstVerification, {
+  providerId: provider.providerId,
+  ok: false,
+  statusCode: 503,
+  failedAt: recoveredAt + 30 * 60 * 1000,
+  latencyMs: 1_000,
+  failureCategory: 'retryable_gateway',
+  affectsHealth: true,
+  passiveRecoveryReentry: true,
+});
+assert.equal(abortedVerification.recoveryCampaignSuccesses, undefined, 'a technical verification failure ends the campaign');
 
 console.log('Smart routing passive recovery verification passed.');

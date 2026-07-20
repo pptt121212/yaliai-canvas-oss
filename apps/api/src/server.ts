@@ -2776,7 +2776,8 @@ async function executeUpstreamImageRequest(input: {
         attemptedProviderIds: string[];
         reason: 'selected';
       };
-      requestPlan: RoutedImageExecutionCandidate['requestPlan'];
+      requestPlan: UpstreamImageRequestPlan;
+      passiveRecoveryReentry?: boolean;
     };
     payload: z.infer<typeof openAIImagesSchema>;
     response: Awaited<ReturnType<typeof fetchUpstreamAttempt>>;
@@ -2799,7 +2800,20 @@ async function executeUpstreamImageRequest(input: {
     : preview.candidates;
 
   for (let candidateIndex = 0; candidateIndex < executionCandidates.length; candidateIndex += 1) {
-    const candidate = executionCandidates[candidateIndex]!;
+    const candidateInput = executionCandidates[candidateIndex]!;
+    let candidate: PreparedRoutedImageExecutionCandidate;
+    try {
+      candidate = await prepareRoutedImageExecutionCandidate(candidateInput);
+    } catch (error) {
+      if ((preview.mode !== 'smart_failover' && preview.mode !== 'fixed_provider_pool') || isTerminalPayloadPreparationError(error)) {
+        throw error;
+      }
+      preview.filteredOut.push({
+        providerId: candidateInput.provider.providerId,
+        reason: 'payload_adaptation_failed',
+      });
+      continue;
+    }
     const sameProviderRetryAttempt = retrySoleProvider ? candidateIndex : undefined;
     const sameProviderRetryLimit = retrySoleProvider ? maxSoleProviderRetries : undefined;
     if (sameProviderRetryAttempt && sameProviderRetryAttempt > 0) {
@@ -2841,6 +2855,7 @@ async function executeUpstreamImageRequest(input: {
               reason: 'selected',
             },
             requestPlan: candidate.requestPlan,
+            passiveRecoveryReentry: candidate.passiveRecoveryReentry,
           },
           payload: candidate.payload,
           response: {
@@ -2888,6 +2903,7 @@ async function executeUpstreamImageRequest(input: {
             reason: 'selected',
           },
           requestPlan: candidate.requestPlan,
+          passiveRecoveryReentry: candidate.passiveRecoveryReentry,
         },
         payload: candidate.payload,
         response,
@@ -2952,6 +2968,7 @@ async function executeUpstreamImageRequest(input: {
           latencyMs: latestProviderAttemptDurationMs(providerAttempts, candidate.provider.providerId),
           failureCategory: semanticFailure.category,
           errorMessage: 'Upstream responded successfully but did not return usable image output.',
+          passiveRecoveryReentry: candidate.passiveRecoveryReentry,
         });
         lastResult = {
           ...lastResult,
@@ -3010,6 +3027,7 @@ async function executeUpstreamImageRequest(input: {
           bodyJson: response.bodyJson,
           bodyText: response.bodyText,
         }),
+        passiveRecoveryReentry: candidate.passiveRecoveryReentry,
       });
       lastResult.routing = buildRoutingSummary({
         mode: preview.mode,
@@ -3049,6 +3067,7 @@ async function executeUpstreamImageRequest(input: {
         latencyMs: latestProviderAttemptDurationMs(providerAttempts, candidate.provider.providerId),
         failureCategory: failure.category,
         errorMessage: error instanceof Error ? error.message : 'upstream_fetch_failed',
+        passiveRecoveryReentry: candidate.passiveRecoveryReentry,
       });
       lastResult = {
         resolved: {
@@ -3855,20 +3874,48 @@ function resolveRequestedImageTier(payload: z.infer<typeof openAIImagesSchema>):
 
 type EffectiveRoutingMode = ImageRoutingMode | 'fixed_provider_pool';
 
+type UpstreamImageRequestPlan = {
+  url: string;
+  method: 'POST';
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+  bodyFormat: 'json' | 'multipart';
+  multipartFileNames?: Record<string, string[]>;
+};
+
 type RoutedImageExecutionCandidate = {
   provider: ProviderConfig;
-  requestPlan: {
-    url: string;
-    method: 'POST';
-    headers: Record<string, string>;
-    body: Record<string, unknown>;
-    bodyFormat: 'json' | 'multipart';
-    multipartFileNames?: Record<string, string[]>;
-  };
-  payload: z.infer<typeof openAIImagesSchema>;
+  requestPlan?: UpstreamImageRequestPlan;
+  payload?: z.infer<typeof openAIImagesSchema>;
+  prepare?: () => Promise<{
+    payload: z.infer<typeof openAIImagesSchema>;
+    requestPlan: UpstreamImageRequestPlan;
+  }>;
   score?: number;
   reasons?: string[];
+  passiveRecoveryReentry?: boolean;
 };
+
+type PreparedRoutedImageExecutionCandidate = RoutedImageExecutionCandidate & {
+  requestPlan: UpstreamImageRequestPlan;
+  payload: z.infer<typeof openAIImagesSchema>;
+};
+
+async function prepareRoutedImageExecutionCandidate(
+  candidate: RoutedImageExecutionCandidate,
+): Promise<PreparedRoutedImageExecutionCandidate> {
+  if (candidate.payload && candidate.requestPlan) {
+    return candidate as PreparedRoutedImageExecutionCandidate;
+  }
+  if (!candidate.prepare) {
+    throw new Error(`Missing upstream request preparation for provider ${candidate.provider.providerId}.`);
+  }
+  const prepared = await candidate.prepare();
+  candidate.payload = prepared.payload;
+  candidate.requestPlan = prepared.requestPlan;
+  candidate.prepare = undefined;
+  return candidate as PreparedRoutedImageExecutionCandidate;
+}
 
 type RoutedProviderAttemptTrace = {
   provider_id: string;
@@ -4027,6 +4074,7 @@ async function promotePassiveRecoveryReentry(input: {
     }
     const reentryReason = 'passive_recovery_reentry';
     item.candidate.reasons = [...(item.candidate.reasons || []), reentryReason];
+    item.candidate.passiveRecoveryReentry = true;
     input.candidates.splice(item.index, 1);
     input.candidates.unshift(item.candidate);
 
@@ -4650,7 +4698,7 @@ function resolveChatRequestTimeoutMs(provider?: ProviderConfig) {
 }
 
 async function fetchUpstreamAttempt(input: {
-  requestPlan: RoutedImageExecutionCandidate['requestPlan'];
+  requestPlan: UpstreamImageRequestPlan;
   timeoutMs: number;
 }) {
   const requestBody = await buildUpstreamFetchBody({
@@ -5362,34 +5410,29 @@ async function buildSmartExecutionPreview(input: {
   });
 
   const selected = shouldStopAfterFirstProviderAttempt(mode)
+    || payload.async
     ? plan.candidates.slice(0, 1)
     : plan.candidates;
 
   const candidates: RoutedImageExecutionCandidate[] = [];
   const adaptationFilteredOut = [...fixedProviderFilteredOut, ...plan.filteredOut];
   for (const candidate of selected) {
-    try {
-      const adaptedPayload = await adaptPayloadForProvider({
+    candidates.push({
+      provider: candidate.provider,
+      score: candidate.score,
+      reasons: candidate.reasons,
+      prepare: async () => {
+        const adaptedPayload = await adaptPayloadForProvider({
         request: input.request,
         payload,
         provider: candidate.provider,
-      });
-      candidates.push({
-        provider: candidate.provider,
-        payload: adaptedPayload,
-        requestPlan: await buildImageRequestPlanForProvider(candidate.provider, input.operation, adaptedPayload),
-        score: candidate.score,
-        reasons: candidate.reasons,
-      });
-    } catch (error) {
-      if ((mode !== 'smart_failover' && mode !== 'fixed_provider_pool') || isTerminalPayloadPreparationError(error)) {
-        throw error;
-      }
-      adaptationFilteredOut.push({
-        providerId: candidate.provider.providerId,
-        reason: 'payload_adaptation_failed',
-      });
-    }
+        });
+        return {
+          payload: adaptedPayload,
+          requestPlan: await buildImageRequestPlanForProvider(candidate.provider, input.operation, adaptedPayload),
+        };
+      },
+    });
   }
 
   await promotePassiveRecoveryReentry({
@@ -5398,6 +5441,23 @@ async function buildSmartExecutionPreview(input: {
     plan,
     candidates,
   });
+
+  // Async tasks persist only the selected route. Preparing fallbacks here used
+  // to transform/download reference images that this task could never send.
+  if (payload.async && candidates[0]) {
+    try {
+      await prepareRoutedImageExecutionCandidate(candidates[0]);
+    } catch (error) {
+      if ((mode !== 'smart_failover' && mode !== 'fixed_provider_pool') || isTerminalPayloadPreparationError(error)) {
+        throw error;
+      }
+      adaptationFilteredOut.push({
+        providerId: candidates[0].provider.providerId,
+        reason: 'payload_adaptation_failed',
+      });
+      candidates.splice(0, 1);
+    }
+  }
 
   return {
     mode,
@@ -6808,6 +6868,7 @@ async function runImageGatewayTask(
           result.routing.provider_attempts || [],
           result.resolved.provider.providerId,
         ),
+        passiveRecoveryReentry: result.resolved.passiveRecoveryReentry,
       }).catch((error) => {
         requestLogWarn('async_provider_success_report_failed', error);
       });
@@ -7171,6 +7232,7 @@ async function replyWithProxyResult(
         result.routing.provider_attempts || [],
         result.resolved.provider.providerId,
       ),
+      passiveRecoveryReentry: result.resolved.passiveRecoveryReentry,
     }).catch((error) => {
       requestLogWarn('async_provider_success_report_failed', error);
     });
@@ -7476,6 +7538,7 @@ app.post('/v1beta/models/:model(^[^:]+):generateContent', async (request, reply)
           failedAt: Date.now(),
           affectsHealth: false,
           latencyMs: latestProviderAttemptDurationMs(result.routing.provider_attempts || [], result.resolved.provider.providerId),
+          passiveRecoveryReentry: result.resolved.passiveRecoveryReentry,
         });
       }
     }
@@ -7614,8 +7677,8 @@ app.post('/v1/images/generations', async (request, reply) => {
       operation: 'generations',
       accessContext,
     });
-    const firstCandidate = preview.candidates[0];
-    if (!firstCandidate) {
+    const selectedCandidate = preview.candidates[0];
+    if (!selectedCandidate) {
       reply.code(503);
       return imageEndpointError({
         code: 'no_provider_available',
@@ -7624,6 +7687,7 @@ app.post('/v1/images/generations', async (request, reply) => {
         failureCategory: 'retryable_no_provider',
       });
     }
+    const firstCandidate = await prepareRoutedImageExecutionCandidate(selectedCandidate);
     const task = await createImageGatewayTask({
       operation: 'generations',
       providerId: firstCandidate.provider.providerId,
@@ -7858,8 +7922,8 @@ app.post('/v1/images/edits', async (request, reply) => {
       operation: 'edits',
       accessContext,
     });
-    const firstCandidate = preview.candidates[0];
-    if (!firstCandidate) {
+    const selectedCandidate = preview.candidates[0];
+    if (!selectedCandidate) {
       reply.code(503);
       return imageEndpointError({
         code: 'no_provider_available',
@@ -7868,6 +7932,7 @@ app.post('/v1/images/edits', async (request, reply) => {
         failureCategory: 'retryable_no_provider',
       });
     }
+    const firstCandidate = await prepareRoutedImageExecutionCandidate(selectedCandidate);
     const task = await createImageGatewayTask({
       operation: 'edits',
       providerId: firstCandidate.provider.providerId,

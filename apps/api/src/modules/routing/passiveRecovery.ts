@@ -2,6 +2,7 @@ import type { ProviderConfig } from '@yali/provider-core';
 
 export const passiveRecoveryReentryMinAgeMs = 30 * 60 * 1000;
 export const passiveRecoveryReentryIntervalSeconds = 30 * 60;
+export const passiveRecoveryReentryMaxSuccesses = 3;
 
 function isTerminalRecoveryFailureCategory(value: unknown) {
   const category = String(value || '').trim();
@@ -24,6 +25,8 @@ export function isPassiveRecoveryReentryProvider(provider: ProviderConfig, now =
     lastErrorCategory?: unknown;
     healthEvidenceAgeMs?: unknown;
     healthEvidenceFreshness?: unknown;
+    recoveryCampaignAttempts?: unknown;
+    recoveryCampaignSuccesses?: unknown;
   } | undefined;
   if (!runtime || isTerminalRecoveryFailureCategory(runtime.lastErrorCategory)) {
     return false;
@@ -37,6 +40,11 @@ export function isPassiveRecoveryReentryProvider(provider: ProviderConfig, now =
   const lastHealthEvidenceAt = Number(runtime.lastHealthEvidenceAt || 0);
   const evidenceAgeMs = Math.max(0, Number(runtime.healthEvidenceAgeMs || 0));
   const evidenceFreshness = Math.max(0, Math.min(1, Number(runtime.healthEvidenceFreshness || 1)));
+  const campaignAttempts = Math.max(0, Number(runtime.recoveryCampaignAttempts || 0));
+  const campaignSuccesses = Math.max(0, Number(runtime.recoveryCampaignSuccesses || 0));
+  if (campaignSuccesses > 0 && campaignSuccesses < passiveRecoveryReentryMaxSuccesses) {
+    return campaignAttempts < passiveRecoveryReentryMaxSuccesses;
+  }
   return lastFailureAt > 0
     && lastFailureAt > lastSuccessAt
     // A rate-limit/concurrency event may set lastFailureAt without counting as
