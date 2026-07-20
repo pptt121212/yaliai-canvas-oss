@@ -1847,6 +1847,24 @@ function contentTypeForExtension(ext: string) {
   return 'image/png';
 }
 
+function outputFormatForImageExtension(extension?: string | null) {
+  const normalized = String(extension || '').trim().toLowerCase();
+  if (normalized === 'jpg' || normalized === 'jpeg') {
+    return 'jpeg';
+  }
+  if (normalized === 'png' || normalized === 'webp') {
+    return normalized;
+  }
+  return undefined;
+}
+
+function actualOutputFormatFromImageData(data: Array<Record<string, unknown>>) {
+  const formats = new Set(data
+    .map((item) => outputFormatForImageExtension(String(item.__actual_output_extension || '')))
+    .filter((format): format is 'png' | 'jpeg' | 'webp' => Boolean(format)));
+  return formats.size === 1 ? [...formats][0] : undefined;
+}
+
 function findCanvasUserByAccount(account: string) {
   const normalized = String(account || '').trim().toLowerCase();
   return canvasUserCache.find((item) => (
@@ -2530,20 +2548,22 @@ async function rewriteImageDataItemsToRequestedFormat(input: {
     const item = { ...input.data[index] };
     const currentUrl = typeof item.url === 'string' ? item.url : '';
     const currentB64 = typeof item.b64_json === 'string' ? item.b64_json : '';
+    if (currentB64) {
+      item.__actual_output_extension = detectImageExtensionFromBuffer(Buffer.from(currentB64, 'base64'));
+    }
 
     if (wantsUrl && !currentUrl && currentB64) {
       await annotateDimensionsFromBase64(item, currentB64);
+      const extension = detectImageExtensionFromBuffer(Buffer.from(currentB64, 'base64'));
       const generatedUrl = await persistGeneratedImageAndBuildUrl({
         request: input.request,
         taskId: input.taskId,
         imageIndex: index,
         base64: currentB64,
-        extension: detectImageExtension({
-          result: '',
-          outputFormat: input.outputFormat,
-        }),
+        extension,
       });
       item.url = generatedUrl;
+      item.__actual_output_extension = extension;
       if (!wantsBase64) {
         delete item.b64_json;
       }
@@ -2552,14 +2572,16 @@ async function rewriteImageDataItemsToRequestedFormat(input: {
     if (wantsUrl && currentUrl && /^data:image\//i.test(currentUrl)) {
       const decoded = decodeImagePayloadToBase64(currentUrl);
       if (decoded?.base64) {
+        const extension = detectImageExtensionFromBuffer(Buffer.from(decoded.base64, 'base64'));
         await annotateDimensionsFromBase64(item, decoded.base64);
         item.url = await persistGeneratedImageAndBuildUrl({
           request: input.request,
           taskId: input.taskId,
           imageIndex: index,
           base64: decoded.base64,
-          extension: decoded.extension,
+          extension,
         });
+        item.__actual_output_extension = extension;
         if (wantsBase64) {
           item.b64_json = decoded.base64;
         }
@@ -2590,6 +2612,7 @@ async function rewriteImageDataItemsToRequestedFormat(input: {
           base64: fetched.base64,
           extension: fetched.extension,
         });
+        item.__actual_output_extension = fetched.extension;
         if (wantsBase64) {
           item.b64_json = fetched.base64;
         }
@@ -2600,9 +2623,15 @@ async function rewriteImageDataItemsToRequestedFormat(input: {
       const decoded = /^data:image\//i.test(currentUrl)
         ? decodeImagePayloadToBase64(currentUrl)
         : null;
-      const base64 = decoded?.base64 || (await fetchImageUrlAsBase64(currentUrl)).base64;
-      item.b64_json = base64;
-      await annotateDimensionsFromBase64(item, base64);
+      const resolvedImage = decoded?.base64
+        ? {
+            base64: decoded.base64,
+            extension: detectImageExtensionFromBuffer(Buffer.from(decoded.base64, 'base64')),
+          }
+        : await fetchImageUrlAsBase64(currentUrl);
+      item.b64_json = resolvedImage.base64;
+      item.__actual_output_extension = resolvedImage.extension;
+      await annotateDimensionsFromBase64(item, resolvedImage.base64);
     }
 
     if (!wantsUrl) {
@@ -2613,7 +2642,7 @@ async function rewriteImageDataItemsToRequestedFormat(input: {
     }
 
     for (const key of Object.keys(item)) {
-      if (key.startsWith('__')) {
+      if (key.startsWith('__') && key !== '__actual_output_extension') {
         delete item[key];
       }
     }
@@ -6282,10 +6311,17 @@ function buildNormalizedImageResponseEnvelope(input: {
   if (response.background === undefined && input.requestedBackground) {
     response.background = input.requestedBackground;
   }
-  if (response.output_format === undefined && input.outputFormat) {
+  const actualOutputFormat = actualOutputFormatFromImageData(input.data);
+  if (actualOutputFormat) {
+    response.output_format = actualOutputFormat;
+  } else if (response.output_format === undefined && input.outputFormat) {
     response.output_format = input.outputFormat;
   }
-  response.data = input.data;
+  response.data = input.data.map((item) => {
+    const nextItem = { ...item };
+    delete nextItem.__actual_output_extension;
+    return nextItem;
+  });
   return response as NormalizedImageResponseBody;
 }
 
