@@ -2666,6 +2666,7 @@ async function normalizeStandardImageResponseBody(input: {
   requestedImageCount?: number;
   requestedSize?: string;
   requestedQuality?: string;
+  requestedPrompt?: string;
   requestedBackground?: string;
   allowDirectPublicImageUrl?: boolean;
 }) {
@@ -2693,6 +2694,7 @@ async function normalizeStandardImageResponseBody(input: {
       outputFormat: input.outputFormat,
       requestedSize: input.requestedSize,
       requestedQuality: input.requestedQuality,
+      requestedPrompt: input.requestedPrompt,
       requestedBackground: input.requestedBackground,
     });
   }
@@ -2734,6 +2736,7 @@ async function normalizeStandardImageResponseBody(input: {
     outputFormat: input.outputFormat,
     requestedSize: input.requestedSize,
     requestedQuality: input.requestedQuality,
+    requestedPrompt: input.requestedPrompt,
     requestedBackground: input.requestedBackground,
   });
 }
@@ -6052,6 +6055,7 @@ async function buildImageTaskResponsePayload(input: {
       requestedImageCount: input.payload.n,
       requestedSize: input.payload.size,
       requestedQuality: input.payload.quality,
+      requestedPrompt: input.payload.prompt,
       requestedBackground: typeof input.payload.extra_body?.background === 'string'
         ? input.payload.extra_body.background
         : undefined,
@@ -6296,6 +6300,7 @@ function buildNormalizedImageResponseEnvelope(input: {
   outputFormat?: string;
   requestedSize?: string;
   requestedQuality?: string;
+  requestedPrompt?: string;
   requestedBackground?: string;
 }): NormalizedImageResponseBody {
   const source = input.bodyJson && typeof input.bodyJson === 'object' && !Array.isArray(input.bodyJson)
@@ -6323,9 +6328,17 @@ function buildNormalizedImageResponseEnvelope(input: {
   } else if (response.output_format === undefined && input.outputFormat) {
     response.output_format = input.outputFormat;
   }
+  const downstreamPrompt = typeof input.requestedPrompt === 'string' ? input.requestedPrompt : '';
   response.data = input.data.map((item) => {
     const nextItem = { ...item };
     delete nextItem.__actual_output_extension;
+    // Upstream adapters can add provider-specific rewritten prompts. The
+    // downstream contract always reflects the caller's original prompt.
+    if (downstreamPrompt.trim()) {
+      nextItem.revised_prompt = downstreamPrompt;
+    } else {
+      delete nextItem.revised_prompt;
+    }
     return nextItem;
   });
   return response as NormalizedImageResponseBody;
@@ -6401,7 +6414,6 @@ function toOpenAIImageDataItem(item: Record<string, unknown>, responseFormat?: D
       ? item.image_url
       : '';
   const b64Json = typeof item.b64_json === 'string' ? item.b64_json : '';
-  const revisedPrompt = typeof item.revised_prompt === 'string' ? item.revised_prompt : undefined;
   const size = typeof item.size === 'string' ? item.size : undefined;
   const output: Record<string, unknown> = {};
 
@@ -6419,9 +6431,6 @@ function toOpenAIImageDataItem(item: Record<string, unknown>, responseFormat?: D
     }
   }
 
-  if (revisedPrompt) {
-    output.revised_prompt = revisedPrompt;
-  }
   if (size) {
     output.size = size;
   }
@@ -6438,6 +6447,7 @@ async function normalizeResponsesImageBody(input: {
   requestedImageCount?: number;
   requestedSize?: string;
   requestedQuality?: string;
+  requestedPrompt?: string;
   requestedBackground?: string;
   allowDirectPublicImageUrl?: boolean;
 }) {
@@ -6493,6 +6503,7 @@ async function normalizeResponsesImageBody(input: {
     outputFormat: input.outputFormat,
     requestedSize: input.requestedSize,
     requestedQuality: input.requestedQuality,
+    requestedPrompt: input.requestedPrompt,
     requestedBackground: input.requestedBackground,
   });
 }
@@ -7234,6 +7245,7 @@ async function replyWithProxyResult(
         requestedImageCount: submittedPayload.n,
         requestedSize: submittedPayload.size,
         requestedQuality: submittedPayload.quality,
+        requestedPrompt: payload.prompt,
         requestedBackground: typeof submittedPayload.extra_body?.background === 'string'
           ? submittedPayload.extra_body.background
           : undefined,
@@ -7250,6 +7262,7 @@ async function replyWithProxyResult(
           requestedImageCount: submittedPayload.n,
           requestedSize: submittedPayload.size,
           requestedQuality: submittedPayload.quality,
+          requestedPrompt: payload.prompt,
           requestedBackground: typeof submittedPayload.extra_body?.background === 'string'
             ? submittedPayload.extra_body.background
             : undefined,
