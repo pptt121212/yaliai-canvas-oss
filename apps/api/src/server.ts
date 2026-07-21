@@ -213,6 +213,7 @@ const referenceImageObjectSchema = z.object({
 
 const imageInputValueSchema = z.string();
 const referenceImageInputValueSchema = z.union([imageInputValueSchema, referenceImageObjectSchema]);
+const originalMultipartImageFileNamesMetadataKey = '__yali_original_multipart_image_file_names';
 
 const openAIImagesSchema = z.object({
   model: z.string().min(1),
@@ -385,6 +386,14 @@ function parseMultipartScalarValue(fieldName: string, rawValue: unknown) {
   return value;
 }
 
+function normalizeIncomingMultipartImageFileName(value: unknown) {
+  const raw = String(value || '').trim().replace(/\\/g, '/');
+  if (!raw) {
+    return '';
+  }
+  return path.basename(raw).replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, 255);
+}
+
 async function readMultipartFilePartAsDataUrl(part: any, budget: ImageInputByteBudget) {
   const chunks: Buffer[] = [];
   let totalBytes = 0;
@@ -409,6 +418,7 @@ async function readMultipartFilePartAsDataUrl(part: any, budget: ImageInputByteB
 async function parseMultipartOpenAIImagesBody(request: any) {
   const payload: Record<string, unknown> = {};
   const imageValues: string[] = [];
+  const imageFileNames: string[] = [];
   const imageBudget = createImageInputByteBudget();
 
   for await (const part of request.parts()) {
@@ -421,6 +431,7 @@ async function parseMultipartOpenAIImagesBody(request: any) {
       const dataUrl = await readMultipartFilePartAsDataUrl(part, imageBudget);
       if (fieldName === 'image' || fieldName === 'image_url' || fieldName === 'image_urls' || fieldName === 'reference_images') {
         imageValues.push(dataUrl);
+        imageFileNames.push(normalizeIncomingMultipartImageFileName(part.filename));
         continue;
       }
       payload[fieldName] = dataUrl;
@@ -431,12 +442,14 @@ async function parseMultipartOpenAIImagesBody(request: any) {
     if (fieldName === 'image' || fieldName === 'image_url') {
       if (typeof parsedValue === 'string' && parsedValue) {
         imageValues.push(parsedValue);
+        imageFileNames.push('');
       }
       continue;
     }
     if (fieldName === 'image_urls' || fieldName === 'reference_images') {
       if (typeof parsedValue === 'string' && parsedValue) {
         imageValues.push(parsedValue);
+        imageFileNames.push('');
       }
       continue;
     }
@@ -450,6 +463,15 @@ async function parseMultipartOpenAIImagesBody(request: any) {
 
   if (imageValues.length) {
     payload.image = imageValues.length === 1 ? imageValues[0] : imageValues;
+    if (imageFileNames.some(Boolean)) {
+      const metadata = payload.metadata && typeof payload.metadata === 'object' && !Array.isArray(payload.metadata)
+        ? payload.metadata as Record<string, unknown>
+        : {};
+      payload.metadata = {
+        ...metadata,
+        [originalMultipartImageFileNamesMetadataKey]: imageFileNames,
+      };
+    }
   }
   return normalizeCompatibleOpenAIImagesBody(payload);
 }

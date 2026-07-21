@@ -53,6 +53,8 @@ const fixedImagesExtraBodyFields = [
   'callback_url',
 ] as const;
 
+const originalMultipartImageFileNamesMetadataKey = '__yali_original_multipart_image_file_names';
+
 function joinOpenAIImagesPath(provider: ProviderConfig, operation: OpenAIImagesOperation): string {
   const metadataKey = operation === 'edits' ? 'images_edits_url' : 'images_generations_url';
   const configuredUrl = String(provider.metadata?.[metadataKey] || '').trim();
@@ -300,6 +302,15 @@ function buildMultipartReferenceFileNames(images: string[]) {
   return images.map((image, index) => `reference-${index + 1}.${inferReferenceImageExtension(image)}`);
 }
 
+function resolveMultipartReferenceFileNames(request: OpenAIImagesRequest, images: string[]) {
+  const configured = request.metadata?.[originalMultipartImageFileNamesMetadataKey];
+  const originalNames = Array.isArray(configured)
+    ? configured.map((item) => String(item || '').trim())
+    : [];
+  const fallbackNames = buildMultipartReferenceFileNames(images);
+  return fallbackNames.map((fallbackName, index) => originalNames[index] || fallbackName);
+}
+
 function buildDirectImageReferenceLine(index: number, instruction: unknown, fileName = '') {
   let normalizedInstruction = normalizeDirectImageEditInstructionText(instruction);
   const normalizedFileName = String(fileName || '').trim();
@@ -505,7 +516,7 @@ export function buildOpenAIImagesUpstreamRequest(
     ? resolveImagesEditBodyFormat(provider, request)
     : 'json';
   const multipartReferenceFileNames = operation === 'edits' && bodyFormat === 'multipart'
-    ? buildMultipartReferenceFileNames(imageValues)
+    ? resolveMultipartReferenceFileNames(request, imageValues)
     : [];
   const headers: Record<string, string> = {};
 
@@ -530,7 +541,7 @@ export function buildOpenAIImagesUpstreamRequest(
     body.image = imageValues.length === 1 ? imageValues[0] : imageValues;
   }
 
-  if (operation === 'edits') {
+  if (operation === 'edits' && bodyFormat !== 'multipart') {
     body.prompt = buildImagesEditPrompt(request, imageValues.length, multipartReferenceFileNames);
   }
 
