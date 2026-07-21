@@ -448,7 +448,27 @@ async function fetchImageDimensionsFromUrl(url: string) {
   if (!response.ok) {
     return null;
   }
-  const buffer = Buffer.from(await response.arrayBuffer());
+  if (!response.body) return null;
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    while (total < 524_288) {
+      const next = await reader.read();
+      if (next.done) break;
+      const chunk = Buffer.from(next.value);
+      const remaining = 524_288 - total;
+      chunks.push(chunk.subarray(0, remaining));
+      total += Math.min(chunk.length, remaining);
+      if (chunk.length > remaining) {
+        await reader.cancel('image dimension prefix complete').catch(() => undefined);
+        break;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const buffer = Buffer.concat(chunks, total);
   return parseImageDimensions(buffer);
 }
 

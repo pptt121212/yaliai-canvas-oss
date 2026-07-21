@@ -103,6 +103,7 @@ import {
 } from './canvasWorkflowSchema.js';
 
 const requestBodyLimitBytes = Math.max(1 * 1024 * 1024, Number(process.env.API_REQUEST_BODY_LIMIT_BYTES || 128 * 1024 * 1024));
+const imageRouteBodyLimitBytes = Math.max(4 * 1024 * 1024, Number(process.env.IMAGE_ROUTE_BODY_LIMIT_BYTES || 48 * 1024 * 1024));
 const app = Fastify({
   logger: true,
   bodyLimit: requestBodyLimitBytes,
@@ -165,6 +166,9 @@ const hardMaxInputImageCount = 6;
 const hardMaxInputImageTotalBytes = 30 * 1024 * 1024;
 const multipartInputSpoolRoot = path.join(
   String(process.env.MULTIPART_INPUT_SPOOL_DIR || '').trim() || path.join(process.cwd(), 'data', 'multipart-input-spool'),
+);
+const asyncTaskAssetRoot = path.join(
+  String(process.env.ASYNC_TASK_ASSET_DIR || '').trim() || path.join(process.cwd(), 'data', 'async-task-assets'),
 );
 const multipartInputSpoolStaleMs = Math.max(5 * 60_000, Number(process.env.MULTIPART_INPUT_SPOOL_STALE_MS || 60 * 60_000));
 const maxUpstreamJsonResponseBytes = Math.max(1 * 1024 * 1024, Number(process.env.UPSTREAM_JSON_RESPONSE_MAX_BYTES || 96 * 1024 * 1024));
@@ -414,6 +418,7 @@ type MultipartInputSpool = {
 
 const multipartInputSpools = new WeakMap<object, MultipartInputSpool>();
 const multipartImageSourcePrefix = 'yali-multipart-source://';
+const asyncTaskImageAssetPrefix = 'yali-async-asset://';
 
 function getMultipartInputSpool(request: any) {
   if (!request || typeof request !== 'object') {
@@ -458,6 +463,19 @@ async function cleanupStaleMultipartInputSpools() {
     }));
 }
 
+async function cleanupStaleAsyncTaskAssets() {
+  await fs.mkdir(asyncTaskAssetRoot, { recursive: true });
+  const cutoff = Date.now() - imageTaskTtlSeconds * 1000;
+  const entries = await fs.readdir(asyncTaskAssetRoot, { withFileTypes: true });
+  await Promise.all(entries.filter((entry) => entry.isDirectory()).map(async (entry) => {
+    const directory = path.join(asyncTaskAssetRoot, entry.name);
+    const stat = await fs.stat(directory).catch(() => undefined);
+    if (stat && stat.mtimeMs < cutoff) {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  }));
+}
+
 function sourceRefForMultipartImage(index: number) {
   return `${multipartImageSourcePrefix}${index}`;
 }
@@ -488,16 +506,18 @@ async function materializeMultipartImageSources(
   }
   const values = Array.isArray(payload.image) ? payload.image : [payload.image];
   let changed = false;
-  const materialized = await Promise.all(values.map(async (value) => {
+  const materialized: string[] = [];
+  for (const value of values) {
     const source = sourceForMultipartImageValue(request, value);
     if (!source) {
-      return value;
+      materialized.push(value);
+      continue;
     }
     changed = true;
     const buffer = await fs.readFile(source.filePath);
     assertBufferWithinLimit(buffer, 'multipart input spool image');
-    return `data:${source.mimeType};base64,${buffer.toString('base64')}`;
-  }));
+    materialized.push(`data:${source.mimeType};base64,${buffer.toString('base64')}`);
+  }
   if (!changed) {
     return payload;
   }
@@ -505,6 +525,53 @@ async function materializeMultipartImageSources(
     ...payload,
     image: Array.isArray(payload.image) ? materialized : materialized[0],
   };
+}
+
+async function persistAsyncTaskMultipartAssets(
+  request: any,
+  taskId: string,
+  payload: z.infer<typeof openAIImagesSchema>,
+) {
+  const values = payload.image ? (Array.isArray(payload.image) ? payload.image : [payload.image]) : [];
+  if (!values.length) return { payload, assetDirectory: '' };
+  const directory = path.join(asyncTaskAssetRoot, sanitizeFileSegment(taskId));
+  const nextValues: string[] = [];
+  let copied = false;
+  for (let index = 0; index < values.length; index += 1) {
+    const source = sourceForMultipartImageValue(request, values[index]);
+    if (!source) {
+      nextValues.push(values[index]);
+      continue;
+    }
+    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    const assetName = `${index + 1}-${crypto.randomUUID()}.${source.extension}`;
+    await fs.copyFile(source.filePath, path.join(directory, assetName));
+    nextValues.push(`${asyncTaskImageAssetPrefix}${assetName}`);
+    copied = true;
+  }
+  if (!copied) return { payload, assetDirectory: '' };
+  return {
+    payload: { ...payload, image: Array.isArray(payload.image) ? nextValues : nextValues[0] },
+    assetDirectory: directory,
+  };
+}
+
+async function materializeAsyncTaskImageAssets(
+  assetDirectory: string | undefined,
+  payload: z.infer<typeof openAIImagesSchema>,
+) {
+  if (!assetDirectory || !payload.image) return payload;
+  const values = Array.isArray(payload.image) ? payload.image : [payload.image];
+  const materialized = await Promise.all(values.map(async (value) => {
+    const raw = String(value || '');
+    if (!raw.startsWith(asyncTaskImageAssetPrefix)) return value;
+    const assetName = sanitizeFileSegment(raw.slice(asyncTaskImageAssetPrefix.length));
+    const filePath = path.join(assetDirectory, assetName);
+    const buffer = await fs.readFile(filePath);
+    assertBufferWithinLimit(buffer, 'async task image asset');
+    return `data:${contentTypeForExtension(detectImageExtensionFromBuffer(buffer))};base64,${buffer.toString('base64')}`;
+  }));
+  return { ...payload, image: Array.isArray(payload.image) ? materialized : materialized[0] };
 }
 
 async function spoolMultipartImageFilePart(
@@ -1026,6 +1093,7 @@ function sanitizeRequestPlanForTaskState(plan: unknown) {
   return {
     ...record,
     headers,
+    body: compactSuccessfulImagePayloadForStorage(record.body),
   };
 }
 
@@ -1115,6 +1183,7 @@ type AsyncQueuedTaskInternalState = {
   requestHeaders: Record<string, string>;
   enqueuedAt: number;
   attemptCount: number;
+  assetDirectory?: string;
 };
 
 type RequestAccessResult =
@@ -1131,6 +1200,14 @@ app.addHook('onSend', async (_request, reply, payload) => {
 
 app.options('*', async (_request, reply) => {
   reply.code(204).send();
+});
+
+// Reject overloaded image ingress before Fastify starts buffering a JSON or multipart body.
+app.addHook('onRequest', async (request, reply) => {
+  if ((request.raw.url || '').split('?')[0] !== '/v1/images/generations'
+    && (request.raw.url || '').split('?')[0] !== '/v1/images/edits') return;
+  if (!isDynamicOverloadProtectionActive()) return;
+  reply.header('Retry-After', '5').code(429).send(dynamicOverloadError());
 });
 
 app.get('/health', async () => ({
@@ -2302,6 +2379,33 @@ async function persistCanvasReferenceAssetAndBuildPayload(input: {
   };
 }
 
+async function persistCanvasReferenceAssetFile(input: {
+  request: any;
+  ownerId: string;
+  source: MultipartImageSource;
+}) {
+  const dir = getCanvasReferenceAssetDir();
+  await fs.mkdir(dir, { recursive: true });
+  const token = crypto.randomBytes(24).toString('hex');
+  const owner = sanitizeFileSegment(input.ownerId || 'canvas').slice(0, 48) || 'canvas';
+  const baseName = path.basename(input.source.fileName || `reference.${input.source.extension}`);
+  const safeName = sanitizeFileSegment(baseName.replace(/\.[a-zA-Z0-9]+$/, '')).slice(0, 80);
+  const suffix = safeName ? `_${safeName}` : '';
+  const storedFileName = `${owner}_${token}${suffix}.${sanitizeFileSegment(input.source.extension || 'png')}`;
+  const filePath = path.join(dir, storedFileName);
+  await fs.copyFile(input.source.filePath, filePath);
+  const imageUrl = `${inferPublicBaseUrl(input.request)}/v1/canvas/reference-assets/${encodeURIComponent(storedFileName)}`;
+  return {
+    image_url: imageUrl,
+    download_url: imageUrl,
+    remote_reference_url: imageUrl,
+    reference_asset_token: token,
+    node_id: 'api-server',
+    size_bytes: input.source.bytes,
+    source: 'worker_temporary_reference_url',
+  };
+}
+
 function listCanvasUserApiKeys(apiKeys: ConsoleApiKey[], user: CanvasUserRecord) {
   return apiKeys
     .filter((item) => item.tenantId === user.tenantId)
@@ -2577,8 +2681,7 @@ async function fetchImageUrlAsBase64(url: string, budget?: ImageInputByteBudget)
     };
     throw error;
   }
-  const arrayBuffer = await response.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
+  const buffer = await readResponseBufferWithLimit(response, maxBytes, 'image URL source');
   assertBufferWithinLimit(buffer, 'image URL source', maxBytes);
   if (budget) {
     consumeImageInputBytes(budget, buffer.length);
@@ -2648,8 +2751,7 @@ async function buildMultipartFilePart(
       };
       throw error;
     }
-    const arrayBuffer = await response.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
+    const buffer = await readResponseBufferWithLimit(response, budget.maxImageBytes, 'multipart image source');
     assertBufferWithinLimit(buffer, 'multipart image source', budget.maxImageBytes);
     consumeImageInputBytes(budget, buffer.length);
     const extension = detectImageExtensionFromBuffer(buffer);
@@ -3823,6 +3925,7 @@ function readQueuedTaskInternalState(task: ImageGatewayTaskState): AsyncQueuedTa
     requestHeaders,
     enqueuedAt: Number((internal as Record<string, unknown>).enqueuedAt || task.created_at || Date.now()),
     attemptCount: Math.max(0, Number((internal as Record<string, unknown>).attemptCount || 0)),
+    assetDirectory: String((internal as Record<string, unknown>).assetDirectory || '').trim() || undefined,
   };
 }
 
@@ -3833,6 +3936,7 @@ function writeQueuedTaskInternalState(task: ImageGatewayTaskState, state: AsyncQ
     requestHeaders: state.requestHeaders,
     enqueuedAt: state.enqueuedAt,
     attemptCount: state.attemptCount,
+    assetDirectory: state.assetDirectory || '',
   };
 }
 
@@ -4939,25 +5043,37 @@ function assertContentLengthWithinLimit(response: Response, limitBytes: number, 
 }
 
 async function readResponseArrayBufferWithLimit(response: Response, limitBytes: number, label: string) {
-  assertContentLengthWithinLimit(response, limitBytes, label);
-  const arrayBuffer = await response.arrayBuffer();
-  if (arrayBuffer.byteLength > limitBytes) {
-    const error = new Error(`${label} exceeds maximum response size of ${limitBytes} bytes.`);
-    (error as Error & { statusCode?: number }).statusCode = 413;
-    throw error;
-  }
-  return arrayBuffer;
+  return (await readResponseBufferWithLimit(response, limitBytes, label)).buffer;
 }
 
 async function readResponseTextWithLimit(response: Response, limitBytes: number, label: string) {
+  return (await readResponseBufferWithLimit(response, limitBytes, label)).toString('utf8');
+}
+
+async function readResponseBufferWithLimit(response: Response, limitBytes: number, label: string) {
   assertContentLengthWithinLimit(response, limitBytes, label);
-  const rawResponseText = await response.text();
-  if (Buffer.byteLength(rawResponseText, 'utf8') > limitBytes) {
-    const error = new Error(`${label} exceeds maximum response size of ${limitBytes} bytes.`);
-    (error as Error & { statusCode?: number }).statusCode = 413;
-    throw error;
+  if (!response.body) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      const chunk = Buffer.from(next.value);
+      total += chunk.length;
+      if (total > limitBytes) {
+        await reader.cancel(`${label} exceeds maximum response size.`).catch(() => undefined);
+        const error = new Error(`${label} exceeds maximum response size of ${limitBytes} bytes.`);
+        (error as Error & { statusCode?: number }).statusCode = 413;
+        throw error;
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    reader.releaseLock();
   }
-  return rawResponseText;
+  return Buffer.concat(chunks, total);
 }
 
 function resolveChatRequestTimeoutMs(provider?: ProviderConfig) {
@@ -6997,6 +7113,7 @@ async function processImagePersistenceOutbox() {
 }
 
 async function createImageGatewayTask(input: {
+  request?: any;
   operation: 'generations' | 'edits';
   providerId: string;
   providerBaseUrl?: string;
@@ -7008,6 +7125,7 @@ async function createImageGatewayTask(input: {
 }) {
   const now = Number(input.createdAt || Date.now());
   const taskId = createRuntimeTaskId('imgtask');
+  const persistedAssets = await persistAsyncTaskMultipartAssets(input.request, taskId, input.payload);
   const record: ImageGatewayTaskState = {
     task_id: taskId,
     operation: input.operation,
@@ -7021,11 +7139,12 @@ async function createImageGatewayTask(input: {
     error: null,
   };
   writeQueuedTaskInternalState(record, {
-    payload: input.payload,
+    payload: persistedAssets.payload,
     accessContext: input.accessContext,
     requestHeaders: input.requestHeaders,
     enqueuedAt: now,
     attemptCount: 0,
+    assetDirectory: persistedAssets.assetDirectory || undefined,
   });
   await setImageTaskState(taskId, record, imageTaskTtlSeconds);
   void upsertTaskRecord({
@@ -7039,12 +7158,12 @@ async function createImageGatewayTask(input: {
     status: 'queued',
     providerId: input.providerId,
     providerBaseUrl: input.providerBaseUrl,
-    model: input.payload.model,
-    promptPreview: input.payload.prompt.slice(0, 120),
+    model: persistedAssets.payload.model,
+    promptPreview: persistedAssets.payload.prompt.slice(0, 120),
     createdAt: now,
     updatedAt: now,
     requestPayload: {
-      payload: input.payload,
+      payload: compactSuccessfulImagePayloadForStorage(persistedAssets.payload),
       requestPlan: input.requestPlan,
     },
     responsePayload: null,
@@ -7076,7 +7195,8 @@ async function runImageGatewayTask(
   await setImageTaskState(taskId, task, imageTaskTtlSeconds);
 
   try {
-    const result = await executeUpstreamImageRequest({ request, payload, operation, accessContext });
+    const executionPayload = await materializeAsyncTaskImageAssets(internal?.assetDirectory, payload);
+    const result = await executeUpstreamImageRequest({ request, payload: executionPayload, operation, accessContext });
     if (!result) {
       task.status = 'failed';
       task.error = {
@@ -7331,6 +7451,11 @@ async function runImageGatewayTask(
       tags: ['runtime', 'async', 'completion'],
     });
   } finally {
+    if (internal?.assetDirectory) {
+      await fs.rm(internal.assetDirectory, { recursive: true, force: true }).catch((error) => {
+        requestLogWarn('async_task_asset_cleanup_failed', error);
+      });
+    }
     await releaseImageConcurrency(concurrencyKey, globalConcurrencyKey);
     await releaseAsyncTaskClaim(taskClaimKey);
   }
@@ -7869,7 +7994,7 @@ app.post('/v1beta/models/:model(^[^:]+):generateContent', async (request, reply)
   }
 });
 
-app.post('/v1/images/generations', async (request, reply) => {
+app.post('/v1/images/generations', { bodyLimit: imageRouteBodyLimitBytes }, async (request, reply) => {
   const requestStartedAt = Date.now();
   let payload = normalizePublicOpenAIImagesPayload(openAIImagesSchema.parse(
     await parseIncomingOpenAIImagesBody(request),
@@ -7962,11 +8087,6 @@ app.post('/v1/images/generations', async (request, reply) => {
     return dynamicOverloadError();
   }
   if (payload.async) {
-    // Async tasks can resume on another worker after this HTTP request ends,
-    // so their image sources must be persisted in the task payload.
-    payload = await materializeMultipartImageSources(request, payload);
-  }
-  if (payload.async) {
     const queueState = await inspectAsyncQueueState(accessContext);
     if (queueState.totalQueuedCount >= asyncImageQueueMax) {
       reply.code(429);
@@ -8012,6 +8132,7 @@ app.post('/v1/images/generations', async (request, reply) => {
     }
     const firstCandidate = await prepareRoutedImageExecutionCandidate(selectedCandidate);
     const task = await createImageGatewayTask({
+      request,
       operation: 'generations',
       providerId: firstCandidate.provider.providerId,
       providerBaseUrl: firstCandidate.provider.baseUrl,
@@ -8114,7 +8235,7 @@ app.post('/v1/images/generations', async (request, reply) => {
   }
 });
 
-app.post('/v1/images/edits', async (request, reply) => {
+app.post('/v1/images/edits', { bodyLimit: imageRouteBodyLimitBytes }, async (request, reply) => {
   const requestStartedAt = Date.now();
   let payload = normalizePublicOpenAIImagesPayload(openAIImagesSchema.parse(
     await parseIncomingOpenAIImagesBody(request),
@@ -8212,11 +8333,6 @@ app.post('/v1/images/edits', async (request, reply) => {
     return dynamicOverloadError();
   }
   if (payload.async) {
-    // Async tasks can resume on another worker after this HTTP request ends,
-    // so their image sources must be persisted in the task payload.
-    payload = await materializeMultipartImageSources(request, payload);
-  }
-  if (payload.async) {
     const queueState = await inspectAsyncQueueState(accessContext);
     if (queueState.totalQueuedCount >= asyncImageQueueMax) {
       reply.code(429);
@@ -8262,6 +8378,7 @@ app.post('/v1/images/edits', async (request, reply) => {
     }
     const firstCandidate = await prepareRoutedImageExecutionCandidate(selectedCandidate);
     const task = await createImageGatewayTask({
+      request,
       operation: 'edits',
       providerId: firstCandidate.provider.providerId,
       providerBaseUrl: firstCandidate.provider.baseUrl,
@@ -9160,22 +9277,11 @@ app.post('/v1/canvas/reference-assets', async (request, reply) => {
     };
   }
 
-  const chunks: Buffer[] = [];
-  let totalBytes = 0;
-  for await (const chunk of part.file) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    totalBytes += buffer.length;
-    if (totalBytes > maxImagePayloadBytes) {
-      throw createImagePayloadTooLargeError(totalBytes);
-    }
-    chunks.push(buffer);
-  }
-
-  return persistCanvasReferenceAssetAndBuildPayload({
+  const source = await spoolMultipartImageFilePart(request, part, createImageInputByteBudget());
+  return persistCanvasReferenceAssetFile({
     request,
     ownerId: currentUser.id,
-    fileName: String(part.filename || request.headers['x-yali-upload-file-name'] || ''),
-    buffer: Buffer.concat(chunks),
+    source,
   });
 });
 
@@ -9794,6 +9900,9 @@ await initializeAdminConsoleCatalogStore();
 await initializeAdminControlPlaneStore();
 await cleanupStaleMultipartInputSpools().catch((error) => {
   requestLogWarn('multipart_input_spool_startup_cleanup_failed', error);
+});
+await cleanupStaleAsyncTaskAssets().catch((error) => {
+  requestLogWarn('async_task_asset_startup_cleanup_failed', error);
 });
 dynamicOverloadGuard.configure(adminControlPlaneStore.get().publicApi);
 subscribeAdminControlPlane((config) => dynamicOverloadGuard.configure(config.publicApi));
