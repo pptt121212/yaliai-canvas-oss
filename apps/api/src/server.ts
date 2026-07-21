@@ -2741,6 +2741,7 @@ async function normalizeStandardImageResponseBody(input: {
 app.get('/v1/generated-images/:fileName', async (request, reply) => {
   const params = z.object({ fileName: z.string().min(1) }).parse(request.params);
   const fileName = sanitizeFileSegment(params.fileName);
+  const download = String((request.query as Record<string, unknown>)?.download || '') === '1';
   const filePath = path.join(getGeneratedImageDir(), fileName);
   try {
     const stats = await fs.stat(filePath);
@@ -2751,6 +2752,9 @@ app.get('/v1/generated-images/:fileName', async (request, reply) => {
     reply.header('Cache-Control', 'public, max-age=1200, immutable');
     reply.header('ETag', etag);
     reply.header('Last-Modified', lastModified);
+    if (download) {
+      reply.header('Content-Disposition', `attachment; filename="${fileName}"`);
+    }
     if (
       String(request.headers['if-none-match'] || '').trim() === etag
       || (
