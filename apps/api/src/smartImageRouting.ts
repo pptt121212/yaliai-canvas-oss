@@ -89,6 +89,7 @@ export type UpstreamFailureCategory =
   | 'retryable_overloaded'
   | 'retryable_upstream_auth'
   | 'retryable_upstream_quota'
+  | 'retryable_upstream_dispatch'
   | 'retryable_upstream_capability'
   | 'terminal_invalid_request'
   | 'terminal_user_content'
@@ -1132,6 +1133,20 @@ export function classifyUpstreamFailure(input: {
       category: 'retryable_upstream_auth',
       shouldFailover: true,
       cooldownMs: 0,
+      affectsHealth: true,
+    };
+  }
+  const upstreamDispatchSignals = [
+    'channel_dispatch_disabled',
+    'channel dispatch disabled',
+    '当前分组绑定的渠道未开启调度',
+    '渠道未开启调度',
+  ];
+  if (upstreamDispatchSignals.some((signal) => haystack.includes(signal))) {
+    return {
+      category: 'retryable_upstream_dispatch',
+      shouldFailover: true,
+      cooldownMs: 5 * 60_000,
       affectsHealth: true,
     };
   }

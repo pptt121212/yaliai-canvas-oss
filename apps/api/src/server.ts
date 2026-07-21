@@ -5271,6 +5271,8 @@ function buildUpstreamFailureEnvelope(input: {
   return buildStandardDownstreamError({
     code: failureCategory === 'terminal_safety'
       ? 'upstream_safety_rejected'
+      : failureCategory === 'retryable_upstream_dispatch'
+        ? 'upstream_temporary_failure'
       : classifyDownstreamErrorCode(input.statusCode),
     message: sanitizeDownstreamFailureMessage(failureCategory),
     statusCode: input.statusCode,

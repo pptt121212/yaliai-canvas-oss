@@ -34,6 +34,33 @@ const cases = [
     category: 'retryable_overloaded',
     shouldFailover: true,
   },
+  {
+    name: 'Upstream quota failure remains retryable',
+    input: {
+      statusCode: 400,
+      bodyJson: { error: { code: 'insufficient_user_quota', message: 'quota exceeded' } },
+    },
+    category: 'retryable_upstream_quota',
+    shouldFailover: true,
+  },
+  {
+    name: 'Upstream authentication failure remains retryable',
+    input: {
+      statusCode: 401,
+      bodyJson: { error: { code: 'invalid_api_key', message: 'invalid api key' } },
+    },
+    category: 'retryable_upstream_auth',
+    shouldFailover: true,
+  },
+  {
+    name: 'Disabled upstream channel fails over',
+    input: {
+      statusCode: 400,
+      bodyJson: { error: { code: 'channel_dispatch_disabled', message: '当前分组绑定的渠道未开启调度，请联系客服处理。' } },
+    },
+    category: 'retryable_upstream_dispatch',
+    shouldFailover: true,
+  },
 ];
 
 for (const testCase of cases) {

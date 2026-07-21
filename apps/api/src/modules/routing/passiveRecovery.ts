@@ -9,6 +9,7 @@ function isTerminalRecoveryFailureCategory(value: unknown) {
   return category.startsWith('terminal_')
     || category === 'retryable_upstream_auth'
     || category === 'retryable_upstream_quota'
+    || category === 'retryable_upstream_dispatch'
     || category === 'retryable_upstream_capability';
 }
 
