@@ -3,7 +3,7 @@ import multipart from '@fastify/multipart';
 import crypto from 'node:crypto';
 import { scryptSync, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs/promises';
-import { createReadStream } from 'node:fs';
+import { createReadStream, openAsBlob } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import {
@@ -163,6 +163,10 @@ const maxImagePayloadBytes = Math.max(
 );
 const hardMaxInputImageCount = 6;
 const hardMaxInputImageTotalBytes = 30 * 1024 * 1024;
+const multipartInputSpoolRoot = path.join(
+  String(process.env.MULTIPART_INPUT_SPOOL_DIR || '').trim() || path.join(process.cwd(), 'data', 'multipart-input-spool'),
+);
+const multipartInputSpoolStaleMs = Math.max(5 * 60_000, Number(process.env.MULTIPART_INPUT_SPOOL_STALE_MS || 60 * 60_000));
 const maxUpstreamJsonResponseBytes = Math.max(1 * 1024 * 1024, Number(process.env.UPSTREAM_JSON_RESPONSE_MAX_BYTES || 96 * 1024 * 1024));
 const maxUpstreamBinaryResponseBytes = Math.max(1 * 1024 * 1024, Number(process.env.UPSTREAM_BINARY_RESPONSE_MAX_BYTES || 64 * 1024 * 1024));
 await app.register(multipart, {
@@ -394,6 +398,168 @@ function normalizeIncomingMultipartImageFileName(value: unknown) {
   return path.basename(raw).replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, 255);
 }
 
+type MultipartImageSource = {
+  sourceRef: string;
+  filePath: string;
+  fileName: string;
+  mimeType: string;
+  extension: string;
+  bytes: number;
+};
+
+type MultipartInputSpool = {
+  directory: string;
+  sources: MultipartImageSource[];
+};
+
+const multipartInputSpools = new WeakMap<object, MultipartInputSpool>();
+const multipartImageSourcePrefix = 'yali-multipart-source://';
+
+function getMultipartInputSpool(request: any) {
+  if (!request || typeof request !== 'object') {
+    return undefined;
+  }
+  return multipartInputSpools.get(request);
+}
+
+async function getOrCreateMultipartInputSpool(request: any) {
+  const existing = getMultipartInputSpool(request);
+  if (existing) {
+    return existing;
+  }
+  await fs.mkdir(multipartInputSpoolRoot, { recursive: true });
+  const directory = await fs.mkdtemp(path.join(multipartInputSpoolRoot, 'request-'));
+  const spool: MultipartInputSpool = { directory, sources: [] };
+  multipartInputSpools.set(request, spool);
+  return spool;
+}
+
+async function releaseMultipartInputSpool(request: any) {
+  const spool = getMultipartInputSpool(request);
+  if (!spool || !request || typeof request !== 'object') {
+    return;
+  }
+  multipartInputSpools.delete(request);
+  await fs.rm(spool.directory, { recursive: true, force: true });
+}
+
+async function cleanupStaleMultipartInputSpools() {
+  await fs.mkdir(multipartInputSpoolRoot, { recursive: true });
+  const cutoff = Date.now() - multipartInputSpoolStaleMs;
+  const entries = await fs.readdir(multipartInputSpoolRoot, { withFileTypes: true });
+  await Promise.all(entries
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith('request-'))
+    .map(async (entry) => {
+      const directory = path.join(multipartInputSpoolRoot, entry.name);
+      const stat = await fs.stat(directory).catch(() => undefined);
+      if (stat && stat.mtimeMs < cutoff) {
+        await fs.rm(directory, { recursive: true, force: true });
+      }
+    }));
+}
+
+function sourceRefForMultipartImage(index: number) {
+  return `${multipartImageSourcePrefix}${index}`;
+}
+
+function sourceForMultipartImageValue(request: any, value: unknown) {
+  const sourceRef = String(value || '').trim();
+  if (!sourceRef.startsWith(multipartImageSourcePrefix)) {
+    return undefined;
+  }
+  return getMultipartInputSpool(request)?.sources.find((source) => source.sourceRef === sourceRef);
+}
+
+function multipartImageSourcesForPayload(request: any, payload: z.infer<typeof openAIImagesSchema>) {
+  const values = payload.image ? (Array.isArray(payload.image) ? payload.image : [payload.image]) : [];
+  if (!values.length) {
+    return undefined;
+  }
+  const sources = values.map((value) => sourceForMultipartImageValue(request, value));
+  return sources.every((source): source is MultipartImageSource => Boolean(source)) ? sources : undefined;
+}
+
+async function materializeMultipartImageSources(
+  request: any,
+  payload: z.infer<typeof openAIImagesSchema>,
+): Promise<z.infer<typeof openAIImagesSchema>> {
+  if (!payload.image) {
+    return payload;
+  }
+  const values = Array.isArray(payload.image) ? payload.image : [payload.image];
+  let changed = false;
+  const materialized = await Promise.all(values.map(async (value) => {
+    const source = sourceForMultipartImageValue(request, value);
+    if (!source) {
+      return value;
+    }
+    changed = true;
+    const buffer = await fs.readFile(source.filePath);
+    assertBufferWithinLimit(buffer, 'multipart input spool image');
+    return `data:${source.mimeType};base64,${buffer.toString('base64')}`;
+  }));
+  if (!changed) {
+    return payload;
+  }
+  return {
+    ...payload,
+    image: Array.isArray(payload.image) ? materialized : materialized[0],
+  };
+}
+
+async function spoolMultipartImageFilePart(
+  request: any,
+  part: any,
+  budget: ImageInputByteBudget,
+) {
+  const spool = await getOrCreateMultipartInputSpool(request);
+  const index = spool.sources.length;
+  const filePath = path.join(spool.directory, `reference-${index + 1}-${crypto.randomUUID()}.bin`);
+  const handle = await fs.open(filePath, 'w', 0o600);
+  let totalBytes = 0;
+  let header = Buffer.alloc(0);
+  let completed = false;
+
+  try {
+    for await (const chunk of part.file) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalBytes += buffer.length;
+      if (totalBytes > budget.maxImageBytes) {
+        throw createImagePayloadTooLargeError(totalBytes, budget.maxImageBytes);
+      }
+      if (budget.totalBytes + totalBytes > budget.maxTotalBytes) {
+        throw createInputImageTotalTooLargeError(budget.totalBytes + totalBytes, budget.maxTotalBytes);
+      }
+      if (header.length < 16) {
+        header = Buffer.concat([header, buffer.subarray(0, Math.max(0, 16 - header.length))]);
+      }
+      await handle.write(buffer);
+    }
+    await handle.close();
+    completed = true;
+  } finally {
+    if (!completed) {
+      await handle.close().catch(() => undefined);
+      await fs.rm(filePath, { force: true }).catch(() => undefined);
+    }
+  }
+
+  consumeImageInputBytes(budget, totalBytes);
+  const extension = detectImageExtensionFromBuffer(header);
+  const declaredMimeType = String(part.mimetype || '').trim().toLowerCase();
+  const mimeType = declaredMimeType.startsWith('image/') ? declaredMimeType : contentTypeForExtension(extension);
+  const source: MultipartImageSource = {
+    sourceRef: sourceRefForMultipartImage(index),
+    filePath,
+    fileName: normalizeIncomingMultipartImageFileName(part.filename) || `reference-${index + 1}.${extension}`,
+    mimeType,
+    extension,
+    bytes: totalBytes,
+  };
+  spool.sources.push(source);
+  return source;
+}
+
 async function readMultipartFilePartAsDataUrl(part: any, budget: ImageInputByteBudget) {
   const chunks: Buffer[] = [];
   let totalBytes = 0;
@@ -428,12 +594,13 @@ async function parseMultipartOpenAIImagesBody(request: any) {
     }
 
     if (part.type === 'file') {
-      const dataUrl = await readMultipartFilePartAsDataUrl(part, imageBudget);
       if (fieldName === 'image' || fieldName === 'image_url' || fieldName === 'image_urls' || fieldName === 'reference_images') {
-        imageValues.push(dataUrl);
-        imageFileNames.push(normalizeIncomingMultipartImageFileName(part.filename));
+        const source = await spoolMultipartImageFilePart(request, part, imageBudget);
+        imageValues.push(source.sourceRef);
+        imageFileNames.push(source.fileName);
         continue;
       }
+      const dataUrl = await readMultipartFilePartAsDataUrl(part, imageBudget);
       payload[fieldName] = dataUrl;
       continue;
     }
@@ -482,6 +649,14 @@ async function parseIncomingOpenAIImagesBody(request: any) {
   }
   return normalizeCompatibleOpenAIImagesBody(request.body);
 }
+
+app.addHook('onResponse', async (request) => {
+  try {
+    await releaseMultipartInputSpool(request);
+  } catch (error) {
+    requestLogWarn('multipart_input_spool_cleanup_failed', error);
+  }
+});
 
 function extractCompatibleImageInputsFromBody(rawBody: unknown) {
   if (!rawBody || typeof rawBody !== 'object' || Array.isArray(rawBody)) {
@@ -2502,6 +2677,7 @@ async function buildUpstreamFetchBody(plan: {
   bodyFormat: 'json' | 'multipart';
   body: Record<string, unknown>;
   multipartFileNames?: Record<string, string[]>;
+  multipartFileSources?: Record<string, MultipartImageSource[]>;
 }) {
   if (plan.bodyFormat === 'json') {
     return JSON.stringify(plan.body);
@@ -2516,7 +2692,14 @@ async function buildUpstreamFetchBody(plan: {
     if (key === 'image') {
       const values = Array.isArray(value) ? value : [value];
       const expectedFileNames = Array.isArray(plan.multipartFileNames?.[key]) ? plan.multipartFileNames?.[key] : [];
+      const sourceFiles = Array.isArray(plan.multipartFileSources?.[key]) ? plan.multipartFileSources?.[key] : [];
       for (const [index, item] of values.entries()) {
+        const source = sourceFiles[index];
+        if (source) {
+          const blob = await openAsBlob(source.filePath, { type: source.mimeType });
+          form.append(key, blob, source.fileName);
+          continue;
+        }
         if (typeof item === 'string') {
           const part = await buildMultipartFilePart(item, expectedFileNames[index], key, index, imageBudget);
           if (part) {
@@ -3939,7 +4122,45 @@ type UpstreamImageRequestPlan = {
   body: Record<string, unknown>;
   bodyFormat: 'json' | 'multipart';
   multipartFileNames?: Record<string, string[]>;
+  multipartFileSources?: Record<string, MultipartImageSource[]>;
 };
+
+async function preparePayloadAndRequestPlanForProvider(input: {
+  request: any;
+  payload: z.infer<typeof openAIImagesSchema>;
+  provider: ProviderConfig;
+  operation: 'generations' | 'edits';
+}) {
+  let payload = await adaptPayloadForProvider({
+    request: input.request,
+    payload: input.payload,
+    provider: input.provider,
+  });
+  let requestPlan = await buildImageRequestPlanForProvider(input.provider, input.operation, payload) as UpstreamImageRequestPlan;
+  const multipartSources = multipartImageSourcesForPayload(input.request, payload);
+
+  // Multipart sources stay as files for multipart upstreams. Other protocols
+  // materialize them only when their JSON body is actually selected.
+  if (multipartSources?.length && requestPlan.bodyFormat !== 'multipart') {
+    const materializedPayload = await materializeMultipartImageSources(input.request, input.payload);
+    payload = await adaptPayloadForProvider({
+      request: input.request,
+      payload: materializedPayload,
+      provider: input.provider,
+    });
+    requestPlan = await buildImageRequestPlanForProvider(input.provider, input.operation, payload) as UpstreamImageRequestPlan;
+  } else if (multipartSources?.length) {
+    requestPlan = {
+      ...requestPlan,
+      multipartFileSources: {
+        ...(requestPlan.multipartFileSources || {}),
+        image: multipartSources,
+      },
+    };
+  }
+
+  return { payload, requestPlan };
+}
 
 type RoutedImageExecutionCandidate = {
   provider: ProviderConfig;
@@ -4763,6 +4984,7 @@ async function fetchUpstreamAttempt(input: {
     bodyFormat: input.requestPlan.bodyFormat,
     body: input.requestPlan.body,
     multipartFileNames: input.requestPlan.multipartFileNames,
+    multipartFileSources: input.requestPlan.multipartFileSources,
   });
 
   const response = await fetchWithTimeout(input.requestPlan.url, {
@@ -5409,17 +5631,18 @@ async function buildSmartExecutionPreview(input: {
         }],
       };
     }
-    const adaptedPayload = await adaptPayloadForProvider({
+    const prepared = await preparePayloadAndRequestPlanForProvider({
       request: input.request,
       payload,
       provider: resolved.provider,
+      operation: input.operation,
     });
     return {
       mode,
       candidates: [{
         provider: resolved.provider,
-        payload: adaptedPayload,
-        requestPlan: await buildImageRequestPlanForProvider(resolved.provider, input.operation, adaptedPayload),
+        payload: prepared.payload,
+        requestPlan: prepared.requestPlan,
         reasons: ['user_supplied'],
       }],
       filteredOut: [],
@@ -5482,15 +5705,12 @@ async function buildSmartExecutionPreview(input: {
       score: candidate.score,
       reasons: candidate.reasons,
       prepare: async () => {
-        const adaptedPayload = await adaptPayloadForProvider({
-        request: input.request,
-        payload,
-        provider: candidate.provider,
+        return preparePayloadAndRequestPlanForProvider({
+          request: input.request,
+          payload,
+          provider: candidate.provider,
+          operation: input.operation,
         });
-        return {
-          payload: adaptedPayload,
-          requestPlan: await buildImageRequestPlanForProvider(candidate.provider, input.operation, adaptedPayload),
-        };
       },
     });
   }
@@ -7742,6 +7962,11 @@ app.post('/v1/images/generations', async (request, reply) => {
     return dynamicOverloadError();
   }
   if (payload.async) {
+    // Async tasks can resume on another worker after this HTTP request ends,
+    // so their image sources must be persisted in the task payload.
+    payload = await materializeMultipartImageSources(request, payload);
+  }
+  if (payload.async) {
     const queueState = await inspectAsyncQueueState(accessContext);
     if (queueState.totalQueuedCount >= asyncImageQueueMax) {
       reply.code(429);
@@ -7985,6 +8210,11 @@ app.post('/v1/images/edits', async (request, reply) => {
     reply.header('Retry-After', '5');
     reply.code(429);
     return dynamicOverloadError();
+  }
+  if (payload.async) {
+    // Async tasks can resume on another worker after this HTTP request ends,
+    // so their image sources must be persisted in the task payload.
+    payload = await materializeMultipartImageSources(request, payload);
   }
   if (payload.async) {
     const queueState = await inspectAsyncQueueState(accessContext);
@@ -9562,6 +9792,9 @@ function normalizeOperationalCostQuality(value: unknown): 'auto' | 'low' | 'medi
 await initializeProviderRegistry();
 await initializeAdminConsoleCatalogStore();
 await initializeAdminControlPlaneStore();
+await cleanupStaleMultipartInputSpools().catch((error) => {
+  requestLogWarn('multipart_input_spool_startup_cleanup_failed', error);
+});
 dynamicOverloadGuard.configure(adminControlPlaneStore.get().publicApi);
 subscribeAdminControlPlane((config) => dynamicOverloadGuard.configure(config.publicApi));
 await initializeCanvasUserStores();

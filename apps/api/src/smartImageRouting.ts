@@ -373,7 +373,10 @@ function filterProviderForRequest(provider: ProviderConfig, context: ImageRoutin
       temporaryRuntimeBlock: false,
     };
   }
-  if (context.operation === 'edits' && context.requestedEditProtocol) {
+  // The OpenAI Images endpoint declares its native edit transports. Responses
+  // accepts the gateway's normalized image inputs, so multipart callers may
+  // legitimately fall back to a Responses provider after conversion.
+  if (context.operation === 'edits' && context.requestedEditProtocol && provider.protocol === 'openai_images') {
     const supportedProtocols = supportedImagesEditProtocols(provider);
     if (!supportedProtocols.includes(context.requestedEditProtocol)) {
       return {
