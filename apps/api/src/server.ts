@@ -4700,6 +4700,23 @@ async function acquireGlobalImageConcurrency() {
   };
 }
 
+async function acquireAsyncQueueAdmission() {
+  const key = 'system:image-async-queue-admission';
+  if (hotStateAtomicCounters) {
+    const result = await hotStateAtomicCounters.acquireConcurrency(key, 1, 120);
+    return { allowed: result.allowed, key };
+  }
+  return { ...concurrencyService.acquire(key, 1, 120), key };
+}
+
+async function releaseAsyncQueueAdmission(key: string) {
+  if (hotStateAtomicCounters) {
+    await hotStateAtomicCounters.releaseConcurrency(key, 120);
+    return;
+  }
+  concurrencyService.release(key, 120);
+}
+
 function dynamicOverloadSnapshot() {
   return dynamicOverloadGuard.getSnapshot(adminControlPlaneStore.get().publicApi);
 }
@@ -7125,7 +7142,28 @@ async function createImageGatewayTask(input: {
 }) {
   const now = Number(input.createdAt || Date.now());
   const taskId = createRuntimeTaskId('imgtask');
-  const persistedAssets = await persistAsyncTaskMultipartAssets(input.request, taskId, input.payload);
+  const admission = await acquireAsyncQueueAdmission();
+  if (!admission.allowed) {
+    const error = new Error('Async image queue admission is busy.');
+    (error as Error & { statusCode?: number; code?: string }).statusCode = 429;
+    (error as Error & { statusCode?: number; code?: string }).code = 'async_queue_admission_busy';
+    throw error;
+  }
+  let persistedAssets: Awaited<ReturnType<typeof persistAsyncTaskMultipartAssets>>;
+  try {
+    const queueState = await inspectAsyncQueueState(input.accessContext);
+    if (queueState.totalQueuedCount >= asyncImageQueueMax || queueState.apiKeyQueuedCount >= asyncImageQueuePerApiKeyMax) {
+      const error = new Error('Async image queue is full.');
+      (error as Error & { statusCode?: number; code?: string }).statusCode = 429;
+      (error as Error & { statusCode?: number; code?: string }).code = queueState.totalQueuedCount >= asyncImageQueueMax
+        ? 'async_queue_full'
+        : 'async_queue_per_key_full';
+      throw error;
+    }
+    persistedAssets = await persistAsyncTaskMultipartAssets(input.request, taskId, input.payload);
+  } finally {
+    await releaseAsyncQueueAdmission(admission.key).catch((error) => requestLogWarn('async_queue_admission_release_failed', error));
+  }
   const record: ImageGatewayTaskState = {
     task_id: taskId,
     operation: input.operation,
@@ -8130,13 +8168,12 @@ app.post('/v1/images/generations', { bodyLimit: imageRouteBodyLimitBytes }, asyn
         failureCategory: 'retryable_no_provider',
       });
     }
-    const firstCandidate = await prepareRoutedImageExecutionCandidate(selectedCandidate);
     const task = await createImageGatewayTask({
       request,
       operation: 'generations',
-      providerId: firstCandidate.provider.providerId,
-      providerBaseUrl: firstCandidate.provider.baseUrl,
-      requestPlan: firstCandidate.requestPlan,
+      providerId: selectedCandidate.provider.providerId,
+      providerBaseUrl: selectedCandidate.provider.baseUrl,
+      requestPlan: { deferred: true },
       accessContext,
       payload,
       requestHeaders: pickAsyncTaskRequestHeaders(request),
@@ -8154,9 +8191,9 @@ app.post('/v1/images/generations', { bodyLimit: imageRouteBodyLimitBytes }, asyn
       tenantId: accessContext.tenantId,
       apiKeyId: accessContext.apiKeyId,
       channelId: imageChannelId,
-      upstreamId: firstCandidate.provider.providerId,
-      upstreamName: firstCandidate.provider.name,
-      providerBaseUrl: firstCandidate.provider.baseUrl,
+      upstreamId: selectedCandidate.provider.providerId,
+      upstreamName: selectedCandidate.provider.name,
+      providerBaseUrl: selectedCandidate.provider.baseUrl,
       operation: 'generations',
       downstreamRequest: {
         headers: request.headers,
@@ -8169,13 +8206,7 @@ app.post('/v1/images/generations', { bodyLimit: imageRouteBodyLimitBytes }, asyn
         query_path: `/v1/images/generations/${task.task_id}`,
         queue_position: queueState.totalQueuedCount + 1,
       },
-      upstreamRequest: {
-        url: firstCandidate.requestPlan.url,
-        method: firstCandidate.requestPlan.method,
-        headers: firstCandidate.requestPlan.headers,
-        bodyFormat: firstCandidate.requestPlan.bodyFormat,
-        body: firstCandidate.requestPlan.body,
-      },
+      upstreamRequest: { deferred: true },
       upstreamResponse: null,
       errorPayload: null,
       tags: ['runtime', 'async', 'submit'],
@@ -8376,13 +8407,12 @@ app.post('/v1/images/edits', { bodyLimit: imageRouteBodyLimitBytes }, async (req
         failureCategory: 'retryable_no_provider',
       });
     }
-    const firstCandidate = await prepareRoutedImageExecutionCandidate(selectedCandidate);
     const task = await createImageGatewayTask({
       request,
       operation: 'edits',
-      providerId: firstCandidate.provider.providerId,
-      providerBaseUrl: firstCandidate.provider.baseUrl,
-      requestPlan: firstCandidate.requestPlan,
+      providerId: selectedCandidate.provider.providerId,
+      providerBaseUrl: selectedCandidate.provider.baseUrl,
+      requestPlan: { deferred: true },
       accessContext,
       payload,
       requestHeaders: pickAsyncTaskRequestHeaders(request),
@@ -8400,9 +8430,9 @@ app.post('/v1/images/edits', { bodyLimit: imageRouteBodyLimitBytes }, async (req
       tenantId: accessContext.tenantId,
       apiKeyId: accessContext.apiKeyId,
       channelId: imageChannelId,
-      upstreamId: firstCandidate.provider.providerId,
-      upstreamName: firstCandidate.provider.name,
-      providerBaseUrl: firstCandidate.provider.baseUrl,
+      upstreamId: selectedCandidate.provider.providerId,
+      upstreamName: selectedCandidate.provider.name,
+      providerBaseUrl: selectedCandidate.provider.baseUrl,
       operation: 'edits',
       downstreamRequest: {
         headers: request.headers,
@@ -8415,13 +8445,7 @@ app.post('/v1/images/edits', { bodyLimit: imageRouteBodyLimitBytes }, async (req
         query_path: `/v1/images/edits/${task.task_id}`,
         queue_position: queueState.totalQueuedCount + 1,
       },
-      upstreamRequest: {
-        url: firstCandidate.requestPlan.url,
-        method: firstCandidate.requestPlan.method,
-        headers: firstCandidate.requestPlan.headers,
-        bodyFormat: firstCandidate.requestPlan.bodyFormat,
-        body: firstCandidate.requestPlan.body,
-      },
+      upstreamRequest: { deferred: true },
       upstreamResponse: null,
       errorPayload: null,
       tags: ['runtime', 'async', 'submit'],
