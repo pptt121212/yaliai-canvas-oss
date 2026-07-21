@@ -13,6 +13,7 @@
     "dev:api": "pnpm --filter @yali/api dev",
     "dev:admin": "pnpm --filter @yali/admin dev",
     "check": "pnpm check:canvas:utf8 && pnpm -r check",
-    "check:canvas:utf8": "node scripts/check-canvas-utf8.mjs"
+    "check:canvas:utf8": "node scripts/check-canvas-utf8.mjs",
+    "verify:upstream-safety": "node scripts/verify-upstream-safety.mjs"
   }
 }

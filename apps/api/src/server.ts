@@ -6858,6 +6858,17 @@ async function runImageGatewayTask(
 
     task.provider_id = result.resolved.provider.providerId;
     task.status = result.response.ok ? 'completed' : 'failed';
+    const downstreamError = result.response.ok
+      ? null
+      : buildUpstreamFailureEnvelope({
+          statusCode: result.response.statusCode,
+          bodyJson: result.response.bodyJson,
+          bodyText: result.response.bodyText,
+          providerId: result.resolved.provider.providerId,
+          providerName: result.resolved.provider.name,
+          providerBaseUrl: result.resolved.provider.baseUrl,
+          routing: result.routing,
+        });
     const taskResponsePayload = await buildImageTaskResponsePayload({
       request,
       payload: result.payload,
@@ -6873,24 +6884,19 @@ async function runImageGatewayTask(
       bodyBinaryExtension: result.response.bodyBinaryExtension,
       responseFormatOverride: 'url',
     });
-    task.result = taskResponsePayload;
+    task.result = result.response.ok
+      ? taskResponsePayload
+      : {
+          ...taskResponsePayload,
+          body: downstreamError,
+        };
     if (task.result && typeof task.result === 'object' && !Array.isArray(task.result)) {
       task.result = {
         ...task.result as Record<string, unknown>,
         routing: result.routing,
       };
     }
-    task.error = result.response.ok
-      ? null
-      : buildUpstreamFailureEnvelope({
-          statusCode: result.response.statusCode,
-          bodyJson: result.response.bodyJson,
-          bodyText: result.response.bodyText,
-          providerId: result.resolved.provider.providerId,
-          providerName: result.resolved.provider.name,
-          providerBaseUrl: result.resolved.provider.baseUrl,
-          routing: result.routing,
-        });
+    task.error = downstreamError;
     task.updated_at = Date.now();
     await setImageTaskState(taskId, task, imageTaskTtlSeconds);
     if (result.response.ok) {
@@ -7244,9 +7250,9 @@ async function replyWithProxyResult(
           allowDirectPublicImageUrl: providerAllowsDirectPublicImageUrl(result.resolved.provider),
         })
       : null;
-  const responseBodyJson = normalizedBody || result.response.bodyJson;
-  const responseBodyText = normalizedBody ? '' : result.response.bodyText;
-    const downstreamError = result.response.ok
+  const upstreamResponseBodyJson = normalizedBody || result.response.bodyJson;
+  const upstreamResponseBodyText = normalizedBody ? '' : result.response.bodyText;
+  const downstreamError = result.response.ok
     ? null
     : buildUpstreamFailureEnvelope({
         statusCode: result.response.statusCode,
@@ -7257,6 +7263,8 @@ async function replyWithProxyResult(
         providerBaseUrl: result.resolved.provider.baseUrl,
         routing: result.routing,
       });
+  const responseBodyJson = result.response.ok ? upstreamResponseBodyJson : downstreamError;
+  const responseBodyText = result.response.ok ? upstreamResponseBodyText : '';
   if (result.response.ok) {
     void providerRegistry.reportAttempt({
       providerId: result.resolved.provider.providerId,
@@ -7503,12 +7511,25 @@ app.post('/v1beta/models/:model(^[^:]+):generateContent', async (request, reply)
     const statusCode = result?.response.statusCode || 503;
     const responseBody = result?.response.bodyJson;
     const ok = Boolean(result?.response.ok && responseBody);
+    const failure = ok || !result
+      ? null
+      : classifyUpstreamFailure({
+          statusCode,
+          bodyJson: result.response.bodyJson,
+          bodyText: result.response.bodyText,
+        });
     const nativeError = ok
       ? null
-      : buildBananaNativeError(statusCode, extractUpstreamErrorMessage({
-        bodyJson: result?.response.bodyJson,
-        bodyText: result?.response.bodyText,
-      }), statusCode >= 500 ? 'UNAVAILABLE' : 'FAILED_PRECONDITION');
+      : buildBananaNativeError(
+        statusCode,
+        failure?.category === 'terminal_safety'
+          ? publicMessageForFailureCategory(failure.category)
+          : extractUpstreamErrorMessage({
+              bodyJson: result?.response.bodyJson,
+              bodyText: result?.response.bodyText,
+            }),
+        statusCode >= 500 ? 'UNAVAILABLE' : 'FAILED_PRECONDITION',
+      );
     if (result) {
       const responsePayload = {
         statusCode,
