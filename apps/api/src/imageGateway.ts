@@ -23,6 +23,8 @@ const reservedChatBodyFields = new Set([
   'stream',
 ]);
 
+const originalMultipartImageFileNamesMetadataKey = '__yali_original_multipart_image_file_names';
+
 function sanitizeInjectedBodyFields(
   fields: Record<string, unknown> | undefined,
   reservedKeys: Set<string>,
@@ -229,6 +231,39 @@ function normalizeReferenceInstructionText(value: unknown) {
   return `下方图片：${text}`;
 }
 
+function fileNameWithoutExtension(value: unknown) {
+  const fileName = String(value || '').trim();
+  const extensionIndex = fileName.lastIndexOf('.');
+  return extensionIndex > 0 ? fileName.slice(0, extensionIndex) : fileName;
+}
+
+function buildResponsesPromptWithMultipartFileOrder(request: OpenAIImagesRequest, imageCount: number) {
+  const prompt = String(request.prompt || '');
+  const rawFileNames = request.metadata?.[originalMultipartImageFileNamesMetadataKey];
+  const fileNames = Array.isArray(rawFileNames)
+    ? rawFileNames.slice(0, imageCount).map((item) => String(item || '').trim())
+    : [];
+
+  if (fileNames.length !== imageCount || fileNames.some((item) => !item)) {
+    return prompt;
+  }
+
+  const normalizedPrompt = prompt.toLocaleLowerCase();
+  const mentionsAnyFileName = fileNames.some((fileName) => {
+    const bareFileName = fileNameWithoutExtension(fileName).toLocaleLowerCase();
+    return bareFileName.length > 0 && normalizedPrompt.includes(bareFileName);
+  });
+  if (!mentionsAnyFileName) {
+    return prompt;
+  }
+
+  const separator = prompt.endsWith('\n') ? '\n' : '\n\n';
+  const referenceOrder = fileNames
+    .map((fileName, index) => `参考图${index + 1}：${fileName}`)
+    .join('\n');
+  return `${prompt}${separator}参考图顺序：\n${referenceOrder}`;
+}
+
 function buildResponsesMultimodalInput(
   prompt: string,
   images: string[],
@@ -275,6 +310,7 @@ function buildResponsesRequestPlan(provider: ProviderConfig, request: OpenAIImag
 
   const images = request.image ? (Array.isArray(request.image) ? request.image : [request.image]) : [];
   const hasReference = images.length > 0;
+  const responsesPrompt = buildResponsesPromptWithMultipartFileOrder(request, images.length);
   const imageToolQuality = request.image_tool_quality
     ?? request.extra_body?.image_tool_quality
     ?? request.quality
@@ -293,7 +329,7 @@ function buildResponsesRequestPlan(provider: ProviderConfig, request: OpenAIImag
   const body: Record<string, unknown> = {
     model: textModel,
     input: buildResponsesMultimodalInput(
-      request.prompt,
+      responsesPrompt,
       images,
       inputShape,
     ),
