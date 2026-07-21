@@ -4841,6 +4841,7 @@ async function failQueuedImageTask(input: {
   errorPayload: Record<string, unknown>;
 }) {
   const request = buildSyntheticQueuedRequest(input.requestHeaders);
+  const internal = readQueuedTaskInternalState(input.task);
   input.task.status = 'failed';
   input.task.error = input.errorPayload;
   input.task.updated_at = Date.now();
@@ -4898,6 +4899,11 @@ async function failQueuedImageTask(input: {
     errorPayload: input.errorPayload,
     tags: ['runtime', 'async', 'completion'],
   });
+  if (internal?.assetDirectory) {
+    await fs.rm(internal.assetDirectory, { recursive: true, force: true }).catch((error) => {
+      requestLogWarn('async_task_asset_cleanup_failed', error);
+    });
+  }
 }
 
 function resolveProviderConcurrencyMax(provider: ProviderConfig) {
@@ -7149,7 +7155,7 @@ async function createImageGatewayTask(input: {
     (error as Error & { statusCode?: number; code?: string }).code = 'async_queue_admission_busy';
     throw error;
   }
-  let persistedAssets: Awaited<ReturnType<typeof persistAsyncTaskMultipartAssets>>;
+  let persistedAssets: Awaited<ReturnType<typeof persistAsyncTaskMultipartAssets>> | undefined;
   try {
     const queueState = await inspectAsyncQueueState(input.accessContext);
     if (queueState.totalQueuedCount >= asyncImageQueueMax || queueState.apiKeyQueuedCount >= asyncImageQueuePerApiKeyMax) {
@@ -7161,53 +7167,61 @@ async function createImageGatewayTask(input: {
       throw error;
     }
     persistedAssets = await persistAsyncTaskMultipartAssets(input.request, taskId, input.payload);
+    const record: ImageGatewayTaskState = {
+      task_id: taskId,
+      operation: input.operation,
+      provider_id: input.providerId,
+      status: 'queued',
+      created_at: now,
+      updated_at: now,
+      queue_expires_at: now + asyncImageQueueWaitMs,
+      request_plan: sanitizeRequestPlanForTaskState(input.requestPlan),
+      result: null,
+      error: null,
+    };
+    writeQueuedTaskInternalState(record, {
+      payload: persistedAssets.payload,
+      accessContext: input.accessContext,
+      requestHeaders: input.requestHeaders,
+      enqueuedAt: now,
+      attemptCount: 0,
+      assetDirectory: persistedAssets.assetDirectory || undefined,
+    });
+    // Keep the admission reservation until this task is visible to every PM2 worker.
+    await setImageTaskState(taskId, record, imageTaskTtlSeconds);
+    void upsertTaskRecord({
+      taskId,
+      requestId: taskId,
+      tenantId: input.accessContext.tenantId,
+      apiKeyId: input.accessContext.apiKeyId,
+      channelId: 'image_generation',
+      upstreamId: input.providerId,
+      operation: input.operation,
+      status: 'queued',
+      providerId: input.providerId,
+      providerBaseUrl: input.providerBaseUrl,
+      model: persistedAssets.payload.model,
+      promptPreview: persistedAssets.payload.prompt.slice(0, 120),
+      createdAt: now,
+      updatedAt: now,
+      requestPayload: {
+        payload: compactSuccessfulImagePayloadForStorage(persistedAssets.payload),
+        requestPlan: input.requestPlan,
+      },
+      responsePayload: null,
+      errorPayload: null,
+    });
+    return record;
+  } catch (error) {
+    if (persistedAssets?.assetDirectory) {
+      await fs.rm(persistedAssets.assetDirectory, { recursive: true, force: true }).catch((cleanupError) => {
+        requestLogWarn('async_task_asset_admission_cleanup_failed', cleanupError);
+      });
+    }
+    throw error;
   } finally {
     await releaseAsyncQueueAdmission(admission.key).catch((error) => requestLogWarn('async_queue_admission_release_failed', error));
   }
-  const record: ImageGatewayTaskState = {
-    task_id: taskId,
-    operation: input.operation,
-    provider_id: input.providerId,
-    status: 'queued',
-    created_at: now,
-    updated_at: now,
-    queue_expires_at: now + asyncImageQueueWaitMs,
-    request_plan: sanitizeRequestPlanForTaskState(input.requestPlan),
-    result: null,
-    error: null,
-  };
-  writeQueuedTaskInternalState(record, {
-    payload: persistedAssets.payload,
-    accessContext: input.accessContext,
-    requestHeaders: input.requestHeaders,
-    enqueuedAt: now,
-    attemptCount: 0,
-    assetDirectory: persistedAssets.assetDirectory || undefined,
-  });
-  await setImageTaskState(taskId, record, imageTaskTtlSeconds);
-  void upsertTaskRecord({
-    taskId,
-    requestId: taskId,
-    tenantId: input.accessContext.tenantId,
-    apiKeyId: input.accessContext.apiKeyId,
-    channelId: 'image_generation',
-    upstreamId: input.providerId,
-    operation: input.operation,
-    status: 'queued',
-    providerId: input.providerId,
-    providerBaseUrl: input.providerBaseUrl,
-    model: persistedAssets.payload.model,
-    promptPreview: persistedAssets.payload.prompt.slice(0, 120),
-    createdAt: now,
-    updatedAt: now,
-    requestPayload: {
-      payload: compactSuccessfulImagePayloadForStorage(persistedAssets.payload),
-      requestPlan: input.requestPlan,
-    },
-    responsePayload: null,
-    errorPayload: null,
-  });
-  return record;
 }
 
 async function runImageGatewayTask(

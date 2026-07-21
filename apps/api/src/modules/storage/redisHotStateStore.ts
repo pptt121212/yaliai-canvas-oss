@@ -92,12 +92,8 @@ async function listByPattern<T>(client: RedisClientType, pattern: string): Promi
     .map((item) => JSON.parse(item) as T);
 }
 
-function isQueuedImageTask(task: ImageGatewayTaskState | null, now = Date.now()) {
-  if (!task || task.status !== 'queued') {
-    return false;
-  }
-  const queueExpiresAt = Number(task.queue_expires_at || 0);
-  return !(queueExpiresAt > 0 && queueExpiresAt <= now);
+function isQueuedImageTask(task: ImageGatewayTaskState | null) {
+  return task?.status === 'queued';
 }
 
 export function createRedisHotStateStore(options: RedisHotStateOptions = {}): AsyncHotStateStore {
@@ -331,11 +327,10 @@ export function createRedisHotStateStore(options: RedisHotStateOptions = {}): As
       const keys = taskIds.map((taskId) => buildKey(prefix, 'image_task', taskId));
       const values = await client.mGet(keys);
       const staleTaskIds: string[] = [];
-      const now = Date.now();
       const tasks: ImageGatewayTaskState[] = [];
       for (let index = 0; index < taskIds.length; index += 1) {
         const task = parseJsonOrNull<ImageGatewayTaskState>(values[index]);
-        if (!task || !isQueuedImageTask(task, now)) {
+        if (!task || !isQueuedImageTask(task)) {
           staleTaskIds.push(taskIds[index]);
           continue;
         }
