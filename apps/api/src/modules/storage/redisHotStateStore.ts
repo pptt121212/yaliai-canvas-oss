@@ -114,22 +114,33 @@ export function createRedisHotStateStore(options: RedisHotStateOptions = {}): As
     ]);
   }
 
-  async function updateQueuedImageTaskIndex(taskId: string, value: ImageGatewayTaskState) {
+  async function writeImageTaskWithQueueIndex(taskId: string, value: ImageGatewayTaskState, ttlSeconds?: number) {
     const normalizedTaskId = String(taskId || '').trim();
     if (!normalizedTaskId) {
       return;
     }
-    if (!isQueuedImageTask(value)) {
-      await removeQueuedImageTaskIds([normalizedTaskId]);
-      return;
+    const taskKey = buildKey(prefix, 'image_task', normalizedTaskId);
+    const transactionClient = client as RedisClientType & {
+      multi(): {
+        set(key: string, value: string, options?: { EX?: number }): unknown;
+        addCommand(args: string[]): unknown;
+        exec(): Promise<unknown[] | null>;
+      };
+    };
+    const transaction = transactionClient.multi();
+    const payload = JSON.stringify(value);
+    if (ttlSeconds && ttlSeconds > 0) {
+      transaction.set(taskKey, payload, { EX: ttlSeconds });
+    } else {
+      transaction.set(taskKey, payload);
     }
-    const score = Math.max(0, Number(value.created_at || value.updated_at || Date.now()));
-    await (client as RedisClientType & { sendCommand(args: string[]): Promise<unknown> }).sendCommand([
-      'ZADD',
-      imageTaskQueueKey,
-      String(score),
-      normalizedTaskId,
-    ]);
+    if (isQueuedImageTask(value)) {
+      const score = Math.max(0, Number(value.created_at || value.updated_at || Date.now()));
+      transaction.addCommand(['ZADD', imageTaskQueueKey, String(score), normalizedTaskId]);
+    } else {
+      transaction.addCommand(['ZREM', imageTaskQueueKey, normalizedTaskId]);
+    }
+    await transaction.exec();
   }
 
   return {
@@ -296,8 +307,7 @@ export function createRedisHotStateStore(options: RedisHotStateOptions = {}): As
     },
     async setImageTask(taskId: string, value: ImageGatewayTaskState, ttlSeconds?: number) {
       await ensureConnected(client);
-      await writeJson(client, buildKey(prefix, 'image_task', taskId), value, ttlSeconds);
-      await updateQueuedImageTaskIndex(taskId, value);
+      await writeImageTaskWithQueueIndex(taskId, value, ttlSeconds);
     },
     async deleteImageTask(taskId: string) {
       await ensureConnected(client);

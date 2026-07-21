@@ -562,15 +562,19 @@ async function materializeAsyncTaskImageAssets(
 ) {
   if (!assetDirectory || !payload.image) return payload;
   const values = Array.isArray(payload.image) ? payload.image : [payload.image];
-  const materialized = await Promise.all(values.map(async (value) => {
+  const materialized: string[] = [];
+  for (const value of values) {
     const raw = String(value || '');
-    if (!raw.startsWith(asyncTaskImageAssetPrefix)) return value;
+    if (!raw.startsWith(asyncTaskImageAssetPrefix)) {
+      materialized.push(raw);
+      continue;
+    }
     const assetName = sanitizeFileSegment(raw.slice(asyncTaskImageAssetPrefix.length));
     const filePath = path.join(assetDirectory, assetName);
     const buffer = await fs.readFile(filePath);
     assertBufferWithinLimit(buffer, 'async task image asset');
-    return `data:${contentTypeForExtension(detectImageExtensionFromBuffer(buffer))};base64,${buffer.toString('base64')}`;
-  }));
+    materialized.push(`data:${contentTypeForExtension(detectImageExtensionFromBuffer(buffer))};base64,${buffer.toString('base64')}`);
+  }
   return { ...payload, image: Array.isArray(payload.image) ? materialized : materialized[0] };
 }
 
@@ -7514,9 +7518,19 @@ async function runImageGatewayTask(
 }
 
 let asyncQueuePumpRunning = false;
+let asyncQueueDispatchPaused = false;
+const activeAsyncImageTaskRuns = new Set<Promise<void>>();
+
+function startAsyncImageTaskRun(input: Parameters<typeof runImageGatewayTask>) {
+  const run = runImageGatewayTask(...input);
+  activeAsyncImageTaskRuns.add(run);
+  void run
+    .catch((error) => requestLogWarn('async_image_task_run_failed', error))
+    .finally(() => activeAsyncImageTaskRuns.delete(run));
+}
 
 async function processAsyncImageQueue() {
-  if (asyncQueuePumpRunning) {
+  if (asyncQueuePumpRunning || asyncQueueDispatchPaused) {
     return;
   }
   asyncQueuePumpRunning = true;
@@ -7597,10 +7611,14 @@ async function processAsyncImageQueue() {
           await releaseApiKeyConcurrency(apiKeyConcurrency.key);
           break;
         }
+        if (asyncQueueDispatchPaused) {
+          await releaseImageConcurrency(apiKeyConcurrency.key, globalConcurrency.key);
+          break;
+        }
 
         started = true;
         dispatched += 1;
-        void runImageGatewayTask(
+        startAsyncImageTaskRun([
           buildSyntheticQueuedRequest(internal.requestHeaders),
           task,
           internal.payload,
@@ -7609,7 +7627,7 @@ async function processAsyncImageQueue() {
           apiKeyConcurrency.key,
           globalConcurrency.key,
           claim.key,
-        );
+        ]);
       } finally {
         if (!started) {
           await releaseAsyncTaskClaim(claim.key);
@@ -9984,6 +10002,7 @@ async function closeApiServer(signal: NodeJS.Signals) {
   }
   gracefulShutdownStarted = true;
   gatewayAcceptingTraffic = false;
+  asyncQueueDispatchPaused = true;
   app.log.info({ signal, gracefulShutdownTimeoutMs, gatewayInstance: gatewayInstanceId }, 'api_server_graceful_shutdown_started');
   const forceExitTimer = setTimeout(() => {
     app.log.error({ signal, gracefulShutdownTimeoutMs }, 'api_server_graceful_shutdown_timed_out');
@@ -9992,6 +10011,10 @@ async function closeApiServer(signal: NodeJS.Signals) {
   forceExitTimer.unref();
   try {
     await app.close();
+    if (activeAsyncImageTaskRuns.size) {
+      app.log.info({ activeAsyncImageTaskRuns: activeAsyncImageTaskRuns.size }, 'api_server_waiting_for_async_image_tasks');
+      await Promise.allSettled(Array.from(activeAsyncImageTaskRuns));
+    }
     app.log.info({ signal }, 'api_server_graceful_shutdown_completed');
     process.exit(0);
   } catch (error) {
