@@ -92,10 +92,7 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
   const [ledgerTenantId, setLedgerTenantId] = useState<string | undefined>();
   const [ledgerDateFrom, setLedgerDateFrom] = useState('');
   const [ledgerDateTo, setLedgerDateTo] = useState('');
-  const [activeLedgerQuery, setActiveLedgerQuery] = useState<TenantFinanceLedgerQuery>({
-    limit: 200,
-    entryType: 'account_adjustment',
-  });
+  const [activeLedgerQuery, setActiveLedgerQuery] = useState<TenantFinanceLedgerQuery>({ limit: 200 });
   const [pageCursors, setPageCursors] = useState<Array<{ createdAt: number; id: string } | undefined>>([undefined]);
   const [form] = Form.useForm<FinanceFormValues>();
   const selectedTenantId = Form.useWatch('tenantId', form);
@@ -236,17 +233,15 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
     form.setFieldValue('tenantId', tenantId);
   }
 
-  const buildLedgerQuery = (entryType = ledgerScope): TenantFinanceLedgerQuery => ({
+  const buildLedgerQuery = (): TenantFinanceLedgerQuery => ({
     limit: 200,
     tenantId: ledgerTenantId,
-    entryType,
     createdAfter: ledgerDateFrom ? new Date(`${ledgerDateFrom}T00:00:00`).getTime() : undefined,
     createdBefore: ledgerDateTo ? new Date(`${ledgerDateTo}T00:00:00`).getTime() + 24 * 60 * 60 * 1000 : undefined,
   });
 
-  const queryLedger = async (entryType = ledgerScope) => {
-    const nextQuery = buildLedgerQuery(entryType);
-    setLedgerScope(entryType);
+  const queryLedger = async () => {
+    const nextQuery = buildLedgerQuery();
     setActiveLedgerQuery(nextQuery);
     setPageCursors([undefined]);
     await onQuery(nextQuery);
@@ -266,7 +261,7 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
     setLedgerDateFrom('');
     setLedgerDateTo('');
     setLedgerAccountKeyword('');
-    const nextQuery = { limit: 200, entryType: ledgerScope } satisfies TenantFinanceLedgerQuery;
+    const nextQuery = { limit: 200 } satisfies TenantFinanceLedgerQuery;
     setActiveLedgerQuery(nextQuery);
     setPageCursors([undefined]);
     await onQuery(nextQuery);
@@ -408,7 +403,7 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
         ) : null}
         <Tabs
           activeKey={ledgerScope}
-          onChange={(key) => void queryLedger(key as 'account_adjustment' | 'tenant_request_charge')}
+          onChange={(key) => setLedgerScope(key as 'account_adjustment' | 'tenant_request_charge')}
           items={[
             {
               key: 'account_adjustment',

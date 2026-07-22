@@ -271,7 +271,7 @@ export function AdminApp() {
         await Promise.all([catalogPromise, controlPlanePromise]);
       } else if (view === 'tenant-finance') {
         const [report, canvasReport] = await Promise.all([
-          fetchTenantFinanceLedgerReport({ limit: 200, entryType: 'account_adjustment' }),
+          fetchTenantFinanceLedgerReport({ limit: 200 }),
           fetchCanvasUsersReport(),
         ]);
         setTenantFinanceReport(report);
