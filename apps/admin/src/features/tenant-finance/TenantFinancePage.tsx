@@ -95,7 +95,6 @@ export function TenantFinancePage({ catalog, reports, canvasUsersReport, saving,
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [searchDraft, setSearchDraft] = useState('');
   const [searchKeyword, setSearchKeyword] = useState('');
-  const [ledgerAccountKeyword, setLedgerAccountKeyword] = useState('');
   const [ledgerScope, setLedgerScope] = useState<FinanceEntryScope>('account_adjustment');
   const [ledgerTenantId, setLedgerTenantId] = useState<string | undefined>();
   const [ledgerDateFrom, setLedgerDateFrom] = useState(todayDateInput);
@@ -178,19 +177,8 @@ export function TenantFinancePage({ catalog, reports, canvasUsersReport, saving,
     }));
   }, [accountByTenantId, ledgerScope, reports]);
 
-  const visibleLedgerRows = useMemo(() => {
-    const keyword = ledgerAccountKeyword.trim().toLowerCase();
-    if (!keyword) return ledgerRows;
-    return ledgerRows.filter((item) => [
-      item.account.username,
-      item.account.email,
-      item.tenantName,
-      item.tenantId,
-      item.operatorLabel,
-    ].filter(Boolean).join(' ').toLowerCase().includes(keyword));
-  }, [ledgerAccountKeyword, ledgerRows]);
-  const accountLedgerRows = ledgerScope === 'account_adjustment' ? visibleLedgerRows : [];
-  const tenantRequestChargeRows = ledgerScope === 'tenant_request_charge' ? visibleLedgerRows : [];
+  const accountLedgerRows = ledgerScope === 'account_adjustment' ? ledgerRows : [];
+  const tenantRequestChargeRows = ledgerScope === 'tenant_request_charge' ? ledgerRows : [];
 
   const searchedTenantOptions = useMemo(() => {
     const keyword = String(searchKeyword || '').trim().toLowerCase();
@@ -303,7 +291,6 @@ export function TenantFinancePage({ catalog, reports, canvasUsersReport, saving,
     const today = todayDateInput();
     setLedgerDateFrom(today);
     setLedgerDateTo(today);
-    setLedgerAccountKeyword('');
     await refreshAllLedgerScopes({
       createdAfter: new Date(`${today}T00:00:00`).getTime(),
       createdBefore: new Date(`${today}T00:00:00`).getTime() + 24 * 60 * 60 * 1000,
@@ -420,13 +407,6 @@ export function TenantFinancePage({ catalog, reports, canvasUsersReport, saving,
           <Button type="primary" loading={ledgerLoading} onClick={() => void queryLedger()}>查询</Button>
           <Button disabled={ledgerLoading} onClick={() => void resetLedgerQuery()}>重置</Button>
         </Space>
-        <Input.Search
-          allowClear
-          value={ledgerAccountKeyword}
-          placeholder="在当前页搜索账户 / 邮箱 / 租户 / API Key"
-          style={{ maxWidth: 420, marginBottom: 16 }}
-          onChange={(event) => setLedgerAccountKeyword(event.target.value)}
-        />
         <Tabs
           activeKey={ledgerScope}
           onChange={(key) => setLedgerScope(key as FinanceEntryScope)}
