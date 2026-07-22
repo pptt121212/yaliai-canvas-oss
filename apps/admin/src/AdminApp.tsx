@@ -187,6 +187,7 @@ export function AdminApp() {
   const [session, setSession] = useState<AdminSession | null>(null);
   const [bootLoading, setBootLoading] = useState(true);
   const [pageLoading, setPageLoading] = useState(false);
+  const [tenantFinanceQueryLoading, setTenantFinanceQueryLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [activeView, setActiveView] = useState<ViewKey>('overview');
@@ -430,13 +431,13 @@ export function AdminApp() {
           report={tenantFinanceReport}
           canvasUsersReport={canvasUsersReport}
           saving={saving}
-          loading={pageLoading}
+          loading={tenantFinanceQueryLoading}
           onQuery={async (query) => {
-            setPageLoading(true);
+            setTenantFinanceQueryLoading(true);
             try {
               setTenantFinanceReport(await fetchTenantFinanceLedgerReport(query));
             } finally {
-              setPageLoading(false);
+              setTenantFinanceQueryLoading(false);
             }
           }}
           onAdjust={(input) => wrapSave(
@@ -526,6 +527,7 @@ export function AdminApp() {
     resolutionAuditReport,
     saving,
     tenantFinanceReport,
+    tenantFinanceQueryLoading,
     canvasUsersReport,
     controlPlane,
   ]);
