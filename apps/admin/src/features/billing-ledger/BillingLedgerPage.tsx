@@ -72,6 +72,7 @@ function operationLabel(value: string) {
 
 export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading, onQuery }: BillingLedgerPageProps) {
   const [activeTab, setActiveTab] = useState<'image' | 'chat'>('image');
+  const [queryLoading, setQueryLoading] = useState(false);
   const [tenantId, setTenantId] = useState<string | undefined>();
   const [dateFrom, setDateFrom] = useState(todayDateInput);
   const [dateTo, setDateTo] = useState(todayDateInput);
@@ -93,6 +94,14 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
       return { value: tenant.id, label: label || tenant.id, searchText: `${label} ${tenant.id}`.toLowerCase() };
     });
   }, [canvasUsersReport, catalog]);
+  const runQuery = async (query: BillingLedgerQuery) => {
+    setQueryLoading(true);
+    try {
+      await onQuery(query);
+    } finally {
+      setQueryLoading(false);
+    }
+  };
   const queryLedger = async (scope = activeTab) => {
     const createdAfter = dateFrom ? new Date(`${dateFrom}T00:00:00`).getTime() : undefined;
     const createdBefore = dateTo ? new Date(`${dateTo}T00:00:00`).getTime() + 24 * 60 * 60 * 1000 : undefined;
@@ -106,7 +115,7 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
     setActiveTab(scope);
     setActiveQuery(nextQuery);
     setPageCursors([undefined]);
-    await onQuery(nextQuery);
+    await runQuery(nextQuery);
   };
   const resetQuery = async () => {
     setTenantId(undefined);
@@ -121,11 +130,11 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
     } satisfies BillingLedgerQuery;
     setActiveQuery(nextQuery);
     setPageCursors([undefined]);
-    await onQuery(nextQuery);
+    await runQuery(nextQuery);
   };
   const loadPage = async (cursor: { createdAt: number; id: string } | undefined, cursors: Array<{ createdAt: number; id: string } | undefined>) => {
     setPageCursors(cursors);
-    await onQuery({
+    await runQuery({
       ...activeQuery,
       cursorCreatedAt: cursor?.createdAt,
       cursorId: cursor?.id,
@@ -138,6 +147,7 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
 
   const canLoadPrevious = pageCursors.length > 1;
   const canLoadNext = report.page.hasMore && Boolean(report.page.nextCursor);
+  const isLoading = loading || queryLoading;
   const isChat = activeTab === 'chat';
   const rows = isChat ? report.chat.rows : report.image.rows;
   const chargedRows = rows.filter((row) => row.status === 'charged');
@@ -250,8 +260,8 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
           />
           <Input type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} />
           <Input type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} />
-          <Button type="primary" loading={loading} onClick={() => void queryLedger()}>查询</Button>
-          <Button disabled={loading} onClick={() => void resetQuery()}>重置</Button>
+          <Button type="primary" loading={isLoading} onClick={() => void queryLedger()}>查询</Button>
+          <Button disabled={isLoading} onClick={() => void resetQuery()}>重置</Button>
         </Space>
       </Card>
 
@@ -284,13 +294,13 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
         <Space wrap style={{ marginTop: 16 }}>
           <Text type="secondary">共匹配 {report.page.totalMatching} 条，当前第 {pageCursors.length} 页，每页 {report.page.limit} 条。</Text>
           <Button
-            disabled={loading || !canLoadPrevious}
+            disabled={isLoading || !canLoadPrevious}
             onClick={() => void loadPage(pageCursors[pageCursors.length - 2], pageCursors.slice(0, -1))}
           >
             上一页
           </Button>
           <Button
-            disabled={loading || !canLoadNext}
+            disabled={isLoading || !canLoadNext}
             onClick={() => {
               const nextCursor = report.page.nextCursor;
               if (!nextCursor) return;

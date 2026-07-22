@@ -477,12 +477,7 @@ export function AdminApp() {
           canvasUsersReport={canvasUsersReport}
           loading={pageLoading}
           onQuery={async (query) => {
-            setPageLoading(true);
-            try {
-              setBillingLedgerReport(await fetchBillingLedgerReport(query));
-            } finally {
-              setPageLoading(false);
-            }
+            setBillingLedgerReport(await fetchBillingLedgerReport(query));
           }}
         />
       );
