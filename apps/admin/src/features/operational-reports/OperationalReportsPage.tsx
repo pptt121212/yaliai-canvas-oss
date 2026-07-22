@@ -175,7 +175,7 @@ export function OperationalReportsPage({
             </Col>
             <Col xs={24} lg={8}>
               <Form.Item name={['analytics', 'operationalRollupLookbackDays']} label="每轮回看天数">
-                <InputNumber min={1} max={90} style={{ width: '100%' }} />
+                <InputNumber min={1} max={3} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
           </Row>

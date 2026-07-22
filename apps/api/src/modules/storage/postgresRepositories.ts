@@ -4,6 +4,12 @@ import type { AdminControlPlaneConfig } from '../admin/controlPlane.js';
 import type { AdminConsoleCatalog } from '../admin/consoleCatalog.js';
 import { notifyPostgresConfigChange } from './postgresConfigEvents.js';
 import { ensureCnyMoneyPrecisionReady } from './moneyPrecisionMigration.js';
+import {
+  dropExpiredOperationalMonthlyPartitions,
+  ensureOperationalMonthlyPartition,
+  normalizeOperationalPartitionTimestamp,
+  startOfUtcMonth,
+} from './operationalPartitions.js';
 import type {
   AdminSessionRecord,
   AsyncCanvasUserRepository,
@@ -513,7 +519,7 @@ async function ensureOperationalTables(pool: Pool, schema: string) {
     `);
     await pool.query(`
       create table if not exists ${schema}.request_traces (
-        trace_id text primary key,
+        trace_id text not null,
         created_at bigint not null,
         updated_at bigint not null,
         source text not null,
@@ -536,12 +542,13 @@ async function ensureOperationalTables(pool: Pool, schema: string) {
         error_payload jsonb,
         failure_category text,
         status_code integer,
-        tags jsonb
-      )
+        tags jsonb,
+        primary key (trace_id, created_at)
+      ) partition by range (created_at)
     `);
     await pool.query(`
       create table if not exists ${schema}.billing_ledger (
-        id text primary key,
+        id text not null,
         created_at bigint not null,
         updated_at bigint not null,
         tenant_id text not null,
@@ -557,12 +564,13 @@ async function ensureOperationalTables(pool: Pool, schema: string) {
         status text not null,
         model text not null,
         size text,
-        detail jsonb not null default '{}'::jsonb
-      )
+        detail jsonb not null default '{}'::jsonb,
+        primary key (id, created_at)
+      ) partition by range (created_at)
     `);
     await pool.query(`
       create table if not exists ${schema}.task_master (
-        task_id text primary key,
+        task_id text not null,
         request_id text not null,
         tenant_id text not null,
         api_key_id text not null,
@@ -579,8 +587,9 @@ async function ensureOperationalTables(pool: Pool, schema: string) {
         request_payload jsonb not null default '{}'::jsonb,
         response_payload jsonb,
         error_payload jsonb,
-        billed_credits bigint
-      )
+        billed_credits bigint,
+        primary key (task_id, created_at)
+      ) partition by range (created_at)
     `);
     await pool.query(`
       create table if not exists ${schema}.tenant_credit_balances (
@@ -608,7 +617,7 @@ async function ensureOperationalTables(pool: Pool, schema: string) {
     `);
     await pool.query(`
       create table if not exists ${schema}.tenant_finance_ledger (
-        id text primary key,
+        id text not null,
         created_at bigint not null,
         updated_at bigint not null,
         tenant_id text not null,
@@ -618,7 +627,32 @@ async function ensureOperationalTables(pool: Pool, schema: string) {
         balance_after_cents bigint not null,
         currency text not null,
         note text not null,
-        detail jsonb not null default '{}'::jsonb
+        detail jsonb not null default '{}'::jsonb,
+        primary key (id, created_at)
+      ) partition by range (created_at)
+    `);
+    await pool.query(`
+      create table if not exists ${schema}.request_trace_index (
+        trace_id text primary key,
+        created_at bigint not null
+      )
+    `);
+    await pool.query(`
+      create table if not exists ${schema}.billing_ledger_index (
+        id text primary key,
+        created_at bigint not null
+      )
+    `);
+    await pool.query(`
+      create table if not exists ${schema}.task_master_index (
+        task_id text primary key,
+        created_at bigint not null
+      )
+    `);
+    await pool.query(`
+      create table if not exists ${schema}.tenant_finance_ledger_index (
+        id text primary key,
+        created_at bigint not null
       )
     `);
     await pool.query(`
@@ -693,6 +727,26 @@ async function ensureOperationalTables(pool: Pool, schema: string) {
     await pool.query(`alter table ${schema}.request_traces add column if not exists status_code integer`);
     await pool.query(`alter table ${schema}.request_traces add column if not exists tags jsonb`);
     await pool.query(`alter table ${schema}.request_traces alter column tags set default '[]'::jsonb`);
+    const partitionCheck = await pool.query(
+      `
+        select relname, relkind
+        from pg_class
+        join pg_namespace on pg_namespace.oid = pg_class.relnamespace
+        where pg_namespace.nspname = $1
+          and relname = any($2::text[])
+      `,
+      [schema, ['request_traces', 'billing_ledger', 'task_master', 'tenant_finance_ledger']],
+    );
+    if (partitionCheck.rows.some((row) => row.relkind !== 'p')) {
+      throw new Error('operational_partition_schema_reset_required');
+    }
+    const now = Date.now();
+    await Promise.all([
+      ensureOperationalMonthlyPartition(pool, schema, 'request_traces', now),
+      ensureOperationalMonthlyPartition(pool, schema, 'billing_ledger', now),
+      ensureOperationalMonthlyPartition(pool, schema, 'task_master', now),
+      ensureOperationalMonthlyPartition(pool, schema, 'tenant_finance_ledger', now),
+    ]);
     await pool.query(`create index if not exists ${schema}_audit_logs_created_at_idx on ${schema}.audit_logs (created_at desc)`);
     await pool.query(`create index if not exists ${schema}_request_traces_created_at_idx on ${schema}.request_traces (created_at desc)`);
     await pool.query(`create index if not exists ${schema}_request_traces_updated_at_idx on ${schema}.request_traces (updated_at)`);
@@ -740,6 +794,169 @@ async function ensureOperationalTables(pool: Pool, schema: string) {
   });
 }
 
+/** Used by the explicit bootstrap command so it creates the same partitioned schema as runtime. */
+export async function ensureOperationalSchemaForPool(pool: Pool, schema: string) {
+  await ensureOperationalTables(pool, schema);
+}
+
+type OperationalRecordLocation = {
+  id: string;
+  createdAt: number;
+};
+
+async function findOperationalRecordLocation(
+  db: PgClient | Pool,
+  schema: string,
+  indexTable: 'request_trace_index' | 'billing_ledger_index' | 'task_master_index' | 'tenant_finance_ledger_index',
+  idColumn: 'trace_id' | 'id' | 'task_id',
+  id: string,
+): Promise<OperationalRecordLocation | null> {
+  const result = await db.query(
+    `select ${idColumn} as id, created_at from ${schema}.${indexTable} where ${idColumn} = $1 limit 1`,
+    [id],
+  );
+  if (!result.rowCount) {
+    return null;
+  }
+  return { id: String(result.rows[0].id), createdAt: Number(result.rows[0].created_at) };
+}
+
+async function insertOperationalRecordLocation(
+  db: PgClient | Pool,
+  schema: string,
+  indexTable: 'request_trace_index' | 'billing_ledger_index' | 'task_master_index' | 'tenant_finance_ledger_index',
+  idColumn: 'trace_id' | 'id' | 'task_id',
+  id: string,
+  createdAt: number,
+) {
+  const result = await db.query(
+    `insert into ${schema}.${indexTable} (${idColumn}, created_at) values ($1,$2) on conflict (${idColumn}) do nothing returning created_at`,
+    [id, createdAt],
+  );
+  return Boolean(result.rowCount);
+}
+
+async function insertBillingLedgerRecord(
+  client: PgClient,
+  schema: string,
+  record: BillingLedgerRecord,
+) {
+  const createdAt = normalizeOperationalPartitionTimestamp(record.createdAt);
+  const inserted = await insertOperationalRecordLocation(
+    client,
+    schema,
+    'billing_ledger_index',
+    'id',
+    record.id,
+    createdAt,
+  );
+  if (!inserted) {
+    return false;
+  }
+  await client.query(
+    `
+      insert into ${schema}.billing_ledger (
+        id, created_at, updated_at, tenant_id, api_key_id, channel_id, upstream_id,
+        request_id, task_id, operation, currency, reserved_credits, charged_credits,
+        status, model, size, detail
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb)
+    `,
+    [
+      record.id,
+      createdAt,
+      record.updatedAt,
+      record.tenantId,
+      record.apiKeyId,
+      record.channelId,
+      record.upstreamId || null,
+      record.requestId,
+      record.taskId || null,
+      record.operation,
+      record.currency,
+      record.reservedCredits,
+      record.chargedCredits,
+      record.status,
+      record.model,
+      record.size || null,
+      JSON.stringify(record.detail || {}),
+    ],
+  );
+  return true;
+}
+
+async function upsertTaskMasterRecord(
+  client: PgClient,
+  schema: string,
+  record: TaskMasterRecord,
+) {
+  const requestedCreatedAt = normalizeOperationalPartitionTimestamp(record.createdAt);
+  const inserted = await insertOperationalRecordLocation(
+    client,
+    schema,
+    'task_master_index',
+    'task_id',
+    record.taskId,
+    requestedCreatedAt,
+  );
+  const location = inserted
+    ? { createdAt: requestedCreatedAt }
+    : await findOperationalRecordLocation(client, schema, 'task_master_index', 'task_id', record.taskId);
+  if (!location) {
+    throw new Error('task_master_location_missing');
+  }
+  await client.query(
+    `
+      insert into ${schema}.task_master (
+        task_id, request_id, tenant_id, api_key_id, channel_id, upstream_id, operation, status,
+        provider_id, model, prompt_preview, created_at, updated_at, completed_at,
+        request_payload, response_payload, error_payload, billed_credits
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16::jsonb,$17::jsonb,$18)
+      on conflict (task_id, created_at) do update set
+        request_id = excluded.request_id,
+        tenant_id = excluded.tenant_id,
+        api_key_id = excluded.api_key_id,
+        channel_id = excluded.channel_id,
+        upstream_id = excluded.upstream_id,
+        operation = excluded.operation,
+        status = excluded.status,
+        provider_id = excluded.provider_id,
+        model = excluded.model,
+        prompt_preview = excluded.prompt_preview,
+        updated_at = excluded.updated_at,
+        completed_at = excluded.completed_at,
+        request_payload = excluded.request_payload,
+        response_payload = excluded.response_payload,
+        error_payload = excluded.error_payload,
+        billed_credits = excluded.billed_credits
+    `,
+    [
+      record.taskId,
+      record.requestId,
+      record.tenantId,
+      record.apiKeyId,
+      record.channelId,
+      record.upstreamId || null,
+      record.operation,
+      record.status,
+      record.providerId || null,
+      record.model,
+      record.promptPreview,
+      location.createdAt,
+      record.updatedAt,
+      record.completedAt || null,
+      JSON.stringify({
+        ...(record.requestPayload || {}),
+        _provider_source: record.providerSource || null,
+        _provider_base_url: record.providerBaseUrl || null,
+      }),
+      JSON.stringify(record.responsePayload || null),
+      record.errorPayload ? JSON.stringify(record.errorPayload) : null,
+      record.billedCredits ?? null,
+    ],
+  );
+  return { ...record, createdAt: location.createdAt };
+}
+
 function retentionCutoff(maxAgeMs: number) {
   return Date.now() - Math.max(0, Number(maxAgeMs || 0));
 }
@@ -773,12 +990,49 @@ async function deleteExpiredRowsInBatches(
   return deleted;
 }
 
+async function prunePartitionedOperationalTable(input: {
+  pool: Pool;
+  schema: string;
+  table: 'request_traces' | 'billing_ledger' | 'task_master';
+  indexTable: 'request_trace_index' | 'billing_ledger_index' | 'task_master_index';
+  idColumn: 'trace_id' | 'id' | 'task_id';
+  timestampColumn: 'created_at' | 'updated_at';
+  cutoff: number;
+}) {
+  await dropExpiredOperationalMonthlyPartitions(input.pool, input.schema, input.table, input.cutoff);
+  const currentMonthStart = startOfUtcMonth(input.cutoff);
+  // Dropped partitions are wholly older than this boundary, so their locators can be removed
+  // without touching the surviving high-volume partitions.
+  await input.pool.query(
+    `delete from ${input.schema}.${input.indexTable} where created_at < $1`,
+    [currentMonthStart],
+  );
+  await deleteExpiredRowsInBatches(
+    input.pool,
+    `${input.schema}.${input.table}`,
+    input.timestampColumn,
+    input.cutoff,
+  );
+  await input.pool.query(
+    `
+      delete from ${input.schema}.${input.indexTable} as idx
+      where idx.created_at >= $1
+        and not exists (
+        select 1 from ${input.schema}.${input.table} as record
+        where record.${input.idColumn} = idx.${input.idColumn}
+          and record.created_at = idx.created_at
+      )
+    `,
+    [currentMonthStart],
+  );
+}
+
 async function pruneOperationalWindow(pool: Pool, schema: string, maxAgeMs: number) {
   const cutoff = retentionCutoff(maxAgeMs);
   await deleteExpiredRowsInBatches(pool, `${schema}.audit_logs`, 'created_at', cutoff);
-  await deleteExpiredRowsInBatches(pool, `${schema}.request_traces`, 'updated_at', cutoff);
-  await deleteExpiredRowsInBatches(pool, `${schema}.billing_ledger`, 'created_at', cutoff);
-  await deleteExpiredRowsInBatches(pool, `${schema}.task_master`, 'updated_at', cutoff);
+  await prunePartitionedOperationalTable({ pool, schema, table: 'request_traces', indexTable: 'request_trace_index', idColumn: 'trace_id', timestampColumn: 'updated_at', cutoff });
+  await prunePartitionedOperationalTable({ pool, schema, table: 'billing_ledger', indexTable: 'billing_ledger_index', idColumn: 'id', timestampColumn: 'created_at', cutoff });
+  await prunePartitionedOperationalTable({ pool, schema, table: 'task_master', indexTable: 'task_master_index', idColumn: 'task_id', timestampColumn: 'updated_at', cutoff });
 }
 
 async function pruneOperationalRetention(pool: Pool, schema: string, retention: {
@@ -788,9 +1042,9 @@ async function pruneOperationalRetention(pool: Pool, schema: string, retention: 
   taskMs: number;
 }) {
   await deleteExpiredRowsInBatches(pool, `${schema}.audit_logs`, 'created_at', retentionCutoff(retention.auditMs));
-  await deleteExpiredRowsInBatches(pool, `${schema}.request_traces`, 'updated_at', retentionCutoff(retention.traceMs));
-  await deleteExpiredRowsInBatches(pool, `${schema}.billing_ledger`, 'created_at', retentionCutoff(retention.billingMs));
-  await deleteExpiredRowsInBatches(pool, `${schema}.task_master`, 'updated_at', retentionCutoff(retention.taskMs));
+  await prunePartitionedOperationalTable({ pool, schema, table: 'request_traces', indexTable: 'request_trace_index', idColumn: 'trace_id', timestampColumn: 'updated_at', cutoff: retentionCutoff(retention.traceMs) });
+  await prunePartitionedOperationalTable({ pool, schema, table: 'billing_ledger', indexTable: 'billing_ledger_index', idColumn: 'id', timestampColumn: 'created_at', cutoff: retentionCutoff(retention.billingMs) });
+  await prunePartitionedOperationalTable({ pool, schema, table: 'task_master', indexTable: 'task_master_index', idColumn: 'task_id', timestampColumn: 'updated_at', cutoff: retentionCutoff(retention.taskMs) });
   await deleteExpiredRowsInBatches(pool, `${schema}.operational_metric_snapshots`, 'expires_at', Date.now());
 }
 
@@ -1008,7 +1262,23 @@ export function createPostgresOperationalRepository(
     },
     async appendTrace(record: RequestTraceRecord) {
       await ensureOperationalTables(pool, schema);
-      await pool.query(
+      const createdAt = normalizeOperationalPartitionTimestamp(record.createdAt);
+      await ensureOperationalMonthlyPartition(pool, schema, 'request_traces', createdAt);
+      const client = await (pool as unknown as { connect: () => Promise<PgClient> }).connect();
+      try {
+        await client.query('begin');
+        const inserted = await insertOperationalRecordLocation(
+          client,
+          schema,
+          'request_trace_index',
+          'trace_id',
+          record.traceId,
+          createdAt,
+        );
+        if (!inserted) {
+          throw new Error('request_trace_id_already_exists');
+        }
+        await client.query(
         `
           insert into ${schema}.request_traces (
             trace_id, created_at, updated_at, source, scope, status, summary,
@@ -1026,7 +1296,7 @@ export function createPostgresOperationalRepository(
         `,
         [
           record.traceId,
-          record.createdAt,
+          createdAt,
           record.updatedAt,
           record.source,
           record.scope,
@@ -1049,13 +1319,27 @@ export function createPostgresOperationalRepository(
           record.failureCategory || null,
           record.statusCode || null,
           JSON.stringify(record.tags || []),
-        ],
-      );
+          ],
+        );
+        await client.query('commit');
+      } catch (error) {
+        await rollbackQuietly(client);
+        throw error;
+      } finally {
+        client.release();
+      }
       return record;
     },
     async updateTrace(traceId: string, patch: Partial<RequestTraceRecord>) {
       await ensureOperationalTables(pool, schema);
-      const current = await pool.query(`select * from ${schema}.request_traces where trace_id = $1 limit 1`, [traceId]);
+      const location = await findOperationalRecordLocation(pool, schema, 'request_trace_index', 'trace_id', traceId);
+      if (!location) {
+        return null;
+      }
+      const current = await pool.query(
+        `select * from ${schema}.request_traces where trace_id = $1 and created_at = $2 limit 1`,
+        [traceId, location.createdAt],
+      );
       if (!current.rowCount) {
         return null;
       }
@@ -1096,6 +1380,7 @@ export function createPostgresOperationalRepository(
               upstream_request = $18::jsonb, upstream_response = $19::jsonb,
               error_payload = $20::jsonb, failure_category = $21, status_code = $22, tags = $23::jsonb
           where trace_id = $1
+            and created_at = $24
         `,
         [
           traceId,
@@ -1121,6 +1406,7 @@ export function createPostgresOperationalRepository(
           next.failureCategory || null,
           next.statusCode || null,
           JSON.stringify(next.tags || []),
+          location.createdAt,
         ],
       );
       return next;
@@ -1187,16 +1473,21 @@ export function createPostgresOperationalRepository(
     },
     async clearTraces() {
       await ensureOperationalTables(pool, schema);
-      const countResult = await pool.query(`select count(*)::bigint as total from ${schema}.request_traces`);
+      const countResult = await pool.query(`select count(*)::bigint as total from ${schema}.request_trace_index`);
       const deletedCount = Number(countResult.rows[0]?.total || 0);
-      await pool.query(`delete from ${schema}.request_traces`);
+      await pool.query(`truncate table ${schema}.request_traces`);
+      await pool.query(`truncate table ${schema}.request_trace_index`);
       return { deletedCount };
     },
     async getTrace(traceId: string) {
       await ensureOperationalTables(pool, schema);
+      const location = await findOperationalRecordLocation(pool, schema, 'request_trace_index', 'trace_id', traceId);
+      if (!location) {
+        return null;
+      }
       const result = await pool.query(
-        `select * from ${schema}.request_traces where trace_id = $1 limit 1`,
-        [traceId],
+        `select * from ${schema}.request_traces where trace_id = $1 and created_at = $2 limit 1`,
+        [traceId, location.createdAt],
       );
       if (!result.rowCount) {
         return null;
@@ -1231,39 +1522,33 @@ export function createPostgresOperationalRepository(
     },
     async createBillingLedger(record: BillingLedgerRecord) {
       await ensureOperationalTables(pool, schema);
-      await pool.query(
-        `
-          insert into ${schema}.billing_ledger (
-            id, created_at, updated_at, tenant_id, api_key_id, channel_id, upstream_id,
-            request_id, task_id, operation, currency, reserved_credits, charged_credits,
-            status, model, size, detail
-          ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb)
-        `,
-        [
-          record.id,
-          record.createdAt,
-          record.updatedAt,
-          record.tenantId,
-          record.apiKeyId,
-          record.channelId,
-          record.upstreamId || null,
-          record.requestId,
-          record.taskId || null,
-          record.operation,
-          record.currency,
-          record.reservedCredits,
-          record.chargedCredits,
-          record.status,
-          record.model,
-          record.size || null,
-          JSON.stringify(record.detail || {}),
-        ],
-      );
+      await ensureOperationalMonthlyPartition(pool, schema, 'billing_ledger', normalizeOperationalPartitionTimestamp(record.createdAt));
+      const client = await (pool as unknown as { connect: () => Promise<PgClient> }).connect();
+      try {
+        await client.query('begin');
+        const inserted = await insertBillingLedgerRecord(client, schema, record);
+        if (!inserted) {
+          throw new Error('billing_ledger_id_already_exists');
+        }
+        await client.query('commit');
+      } catch (error) {
+        await rollbackQuietly(client);
+        throw error;
+      } finally {
+        client.release();
+      }
       return record;
     },
     async updateBillingLedger(id: string, patch: Partial<BillingLedgerRecord>) {
       await ensureOperationalTables(pool, schema);
-      const current = await pool.query(`select * from ${schema}.billing_ledger where id = $1 limit 1`, [id]);
+      const location = await findOperationalRecordLocation(pool, schema, 'billing_ledger_index', 'id', id);
+      if (!location) {
+        return null;
+      }
+      const current = await pool.query(
+        `select * from ${schema}.billing_ledger where id = $1 and created_at = $2 limit 1`,
+        [id, location.createdAt],
+      );
       if (!current.rowCount) {
         return null;
       }
@@ -1292,7 +1577,7 @@ export function createPostgresOperationalRepository(
           update ${schema}.billing_ledger
           set updated_at = $2, upstream_id = $3, task_id = $4, operation = $5, currency = $6,
               reserved_credits = $7, charged_credits = $8, status = $9, model = $10, size = $11, detail = $12::jsonb
-          where id = $1
+          where id = $1 and created_at = $13
         `,
         [
           id,
@@ -1307,6 +1592,7 @@ export function createPostgresOperationalRepository(
           next.model,
           next.size || null,
           JSON.stringify(next.detail || {}),
+          location.createdAt,
         ],
       );
       return next;
@@ -1440,12 +1726,36 @@ export function createPostgresOperationalRepository(
     async purgeTenantData(tenantId: string) {
       await ensureOperationalTables(pool, schema);
       // Financial balances and their immutable ledger are intentionally excluded.
-      const [traceResult, billingResult, taskResult, creditBalanceResult] = await Promise.all([
-        pool.query(`delete from ${schema}.request_traces where tenant_id = $1`, [tenantId]),
-        pool.query(`delete from ${schema}.billing_ledger where tenant_id = $1`, [tenantId]),
-        pool.query(`delete from ${schema}.task_master where tenant_id = $1`, [tenantId]),
-        pool.query(`delete from ${schema}.tenant_credit_balances where tenant_id = $1`, [tenantId]),
-      ]);
+      const client = await (pool as unknown as { connect: () => Promise<PgClient> }).connect();
+      let traceResult: Awaited<ReturnType<PgClient['query']>>;
+      let billingResult: Awaited<ReturnType<PgClient['query']>>;
+      let taskResult: Awaited<ReturnType<PgClient['query']>>;
+      let creditBalanceResult: Awaited<ReturnType<PgClient['query']>>;
+      try {
+        await client.query('begin');
+        traceResult = await client.query(`delete from ${schema}.request_traces where tenant_id = $1`, [tenantId]);
+        billingResult = await client.query(`delete from ${schema}.billing_ledger where tenant_id = $1`, [tenantId]);
+        taskResult = await client.query(`delete from ${schema}.task_master where tenant_id = $1`, [tenantId]);
+        creditBalanceResult = await client.query(`delete from ${schema}.tenant_credit_balances where tenant_id = $1`, [tenantId]);
+        await client.query(`
+          delete from ${schema}.request_trace_index idx
+          where not exists (select 1 from ${schema}.request_traces record where record.trace_id = idx.trace_id and record.created_at = idx.created_at)
+        `);
+        await client.query(`
+          delete from ${schema}.billing_ledger_index idx
+          where not exists (select 1 from ${schema}.billing_ledger record where record.id = idx.id and record.created_at = idx.created_at)
+        `);
+        await client.query(`
+          delete from ${schema}.task_master_index idx
+          where not exists (select 1 from ${schema}.task_master record where record.task_id = idx.task_id and record.created_at = idx.created_at)
+        `);
+        await client.query('commit');
+      } catch (error) {
+        await rollbackQuietly(client);
+        throw error;
+      } finally {
+        client.release();
+      }
       return {
         traces: traceResult.rowCount || 0,
         billing: billingResult.rowCount || 0,
@@ -1512,7 +1822,7 @@ export function createPostgresOperationalRepository(
         updatedAt: Number(row.updated_at || updatedAt),
       } satisfies TenantCreditBalanceRecord;
     },
-    async getTenantCreditBalance(tenantId: string, currency: 'cny') {
+    async getTenantCreditBalance(tenantId: string, currency: 'cny' = 'cny') {
       await ensureOperationalTables(pool, schema);
       const result = await pool.query(
         `select * from ${schema}.tenant_credit_balances where tenant_id = $1 and currency = $2 limit $3`,
@@ -1536,6 +1846,7 @@ export function createPostgresOperationalRepository(
     async createTenantFinanceLedger(input) {
       await ensureOperationalTables(pool, schema);
       const now = Date.now();
+      await ensureOperationalMonthlyPartition(pool, schema, 'tenant_finance_ledger', now);
       const amountCents = Number(input.amountCents || 0);
       const direction = input.direction;
       const delta = direction === 'credit' ? amountCents : -amountCents;
@@ -1544,15 +1855,28 @@ export function createPostgresOperationalRepository(
         const client = await (pool as unknown as { connect: () => Promise<PgClient> }).connect();
         try {
           await client.query('begin');
-          if (stableId) {
-            const existing = await client.query(
-              `select * from ${schema}.tenant_finance_ledger where id = $1 limit 1 for update`,
-              [stableId],
-            );
-            if (existing.rowCount) {
-              await client.query('commit');
-              return mapTenantFinanceLedgerRow(existing.rows[0]);
+          const recordId = stableId || `tenant_finance_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
+          const claimed = await insertOperationalRecordLocation(
+            client,
+            schema,
+            'tenant_finance_ledger_index',
+            'id',
+            recordId,
+            now,
+          );
+          if (!claimed) {
+            const location = await findOperationalRecordLocation(client, schema, 'tenant_finance_ledger_index', 'id', recordId);
+            const existing = location
+              ? await client.query(
+                `select * from ${schema}.tenant_finance_ledger where id = $1 and created_at = $2 limit 1`,
+                [recordId, location.createdAt],
+              )
+              : { rowCount: 0, rows: [] };
+            if (!existing.rowCount) {
+              throw new Error('tenant_finance_ledger_location_missing');
             }
+            await client.query('commit');
+            return mapTenantFinanceLedgerRow(existing.rows[0]);
           }
           const balanceResult = await client.query(
             `
@@ -1578,7 +1902,7 @@ export function createPostgresOperationalRepository(
           const balance = balanceResult.rows[0];
           const nextBalanceCents = Number(balance.balance_cents || 0);
           const record: TenantFinanceLedgerRecord = {
-            id: stableId || `tenant_finance_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`,
+            id: recordId,
             createdAt: now,
             updatedAt: now,
             tenantId: input.tenantId,
@@ -1591,24 +1915,13 @@ export function createPostgresOperationalRepository(
             detail: input.detail && typeof input.detail === 'object' ? input.detail : {},
           };
           await client.query(
-            `
-              insert into ${schema}.tenant_finance_ledger (
-                id, created_at, updated_at, tenant_id, operator_id, direction, amount_cents, balance_after_cents, currency, note, detail
-              ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
-            `,
-            [
-              record.id,
-              record.createdAt,
-              record.updatedAt,
-              record.tenantId,
-              record.operatorId,
-              record.direction,
-              record.amountCents,
-              record.balanceAfterCents,
-              record.currency,
-              record.note,
-              JSON.stringify(record.detail || {}),
-            ],
+            `insert into ${schema}.tenant_finance_ledger (
+              id, created_at, updated_at, tenant_id, operator_id, direction, amount_cents,
+              balance_after_cents, currency, note, detail
+            ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)`,
+            [record.id, record.createdAt, record.updatedAt, record.tenantId, record.operatorId,
+              record.direction, record.amountCents, record.balanceAfterCents, record.currency,
+              record.note, JSON.stringify(record.detail || {})],
           );
           await client.query('commit');
           return record;
@@ -1759,7 +2072,7 @@ export function createPostgresOperationalRepository(
       );
       return Number(result.rows[0]?.total || 0);
     },
-    async getTenantFinanceBalance(tenantId: string, currency: 'cny') {
+    async getTenantFinanceBalance(tenantId: string, currency: 'cny' = 'cny') {
       await ensureOperationalTables(pool, schema);
       const result = await pool.query(
         `select * from ${schema}.tenant_finance_balances where tenant_id = $1 and currency = $2 limit $3`,
@@ -2452,6 +2765,12 @@ export function createPostgresOperationalRepository(
     },
     async applyBillingChargePersistenceBundle(input: BillingChargePersistenceBundle) {
       await ensureOperationalTables(pool, schema);
+      await Promise.all((input.billingRecords || []).map((record) => (
+        ensureOperationalMonthlyPartition(pool, schema, 'billing_ledger', normalizeOperationalPartitionTimestamp(record.createdAt))
+      )));
+      if (input.tenantFinanceLedger?.idempotencyKey) {
+        await ensureOperationalMonthlyPartition(pool, schema, 'tenant_finance_ledger', Date.now());
+      }
       await withPostgresRetry(async () => {
         const client = await (pool as unknown as { connect: () => Promise<PgClient> }).connect();
         try {
@@ -2462,37 +2781,8 @@ export function createPostgresOperationalRepository(
           let creditRequestId = '';
           let creditTaskId = '';
           for (const record of input.billingRecords || []) {
-            const insertResult = await client.query(
-              `
-                insert into ${schema}.billing_ledger (
-                  id, created_at, updated_at, tenant_id, api_key_id, channel_id, upstream_id,
-                  request_id, task_id, operation, currency, reserved_credits, charged_credits,
-                  status, model, size, detail
-                ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb)
-                on conflict (id) do nothing
-                returning id
-              `,
-              [
-                record.id,
-                record.createdAt,
-                record.updatedAt,
-                record.tenantId,
-                record.apiKeyId,
-                record.channelId,
-                record.upstreamId || null,
-                record.requestId,
-                record.taskId || null,
-                record.operation,
-                record.currency,
-                record.reservedCredits,
-                record.chargedCredits,
-                record.status,
-                record.model,
-                record.size || null,
-                JSON.stringify(record.detail || {}),
-              ],
-            );
-            if (insertResult.rowCount && record.status === 'charged' && Number(record.chargedCredits || 0) > 0) {
+            const inserted = await insertBillingLedgerRecord(client, schema, record);
+            if (inserted && record.status === 'charged' && Number(record.chargedCredits || 0) > 0) {
               insertedChargedCredits += Number(record.chargedCredits || 0);
               creditTenantId = record.tenantId;
               creditCurrency = record.currency;
@@ -2520,12 +2810,11 @@ export function createPostgresOperationalRepository(
 
           const finance = input.tenantFinanceLedger;
           if (finance && finance.idempotencyKey && Number(finance.amountCents || 0) > 0) {
-            const existingFinance = await client.query(
-              `select id from ${schema}.tenant_finance_ledger where id = $1 limit 1 for update`,
-              [finance.idempotencyKey],
+            const now = Date.now();
+            const claimedFinance = await insertOperationalRecordLocation(
+              client, schema, 'tenant_finance_ledger_index', 'id', finance.idempotencyKey, now,
             );
-            if (!existingFinance.rowCount) {
-              const now = Date.now();
+            if (claimedFinance) {
               const amountCents = Number(finance.amountCents || 0);
               const delta = finance.direction === 'credit' ? amountCents : -amountCents;
               const balanceResult = await client.query(
@@ -2583,6 +2872,15 @@ export function createPostgresOperationalRepository(
     },
     async applyImageGatewayPersistenceBundle(input: ImageGatewayPersistenceBundle) {
       await ensureOperationalTables(pool, schema);
+      await Promise.all([
+        ...(input.billingRecords || []).map((record) => (
+          ensureOperationalMonthlyPartition(pool, schema, 'billing_ledger', normalizeOperationalPartitionTimestamp(record.createdAt))
+        )),
+        ensureOperationalMonthlyPartition(pool, schema, 'task_master', normalizeOperationalPartitionTimestamp(input.taskRecord.createdAt)),
+        ...(input.tenantFinanceLedger?.idempotencyKey
+          ? [ensureOperationalMonthlyPartition(pool, schema, 'tenant_finance_ledger', Date.now())]
+          : []),
+      ]);
       await withPostgresRetry(async () => {
         const client = await (pool as unknown as { connect: () => Promise<PgClient> }).connect();
         try {
@@ -2593,37 +2891,8 @@ export function createPostgresOperationalRepository(
           let creditRequestId = '';
           let creditTaskId = '';
           for (const record of input.billingRecords || []) {
-            const insertResult = await client.query(
-              `
-                insert into ${schema}.billing_ledger (
-                  id, created_at, updated_at, tenant_id, api_key_id, channel_id, upstream_id,
-                  request_id, task_id, operation, currency, reserved_credits, charged_credits,
-                  status, model, size, detail
-                ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb)
-                on conflict (id) do nothing
-                returning id
-              `,
-              [
-                record.id,
-                record.createdAt,
-                record.updatedAt,
-                record.tenantId,
-                record.apiKeyId,
-                record.channelId,
-                record.upstreamId || null,
-                record.requestId,
-                record.taskId || null,
-                record.operation,
-                record.currency,
-                record.reservedCredits,
-                record.chargedCredits,
-                record.status,
-                record.model,
-                record.size || null,
-                JSON.stringify(record.detail || {}),
-              ],
-            );
-            if (insertResult.rowCount && record.status === 'charged' && Number(record.chargedCredits || 0) > 0) {
+            const inserted = await insertBillingLedgerRecord(client, schema, record);
+            if (inserted && record.status === 'charged' && Number(record.chargedCredits || 0) > 0) {
               insertedChargedCredits += Number(record.chargedCredits || 0);
               creditTenantId = record.tenantId;
               creditCurrency = record.currency;
@@ -2651,12 +2920,11 @@ export function createPostgresOperationalRepository(
 
           const finance = input.tenantFinanceLedger;
           if (finance && finance.idempotencyKey && Number(finance.amountCents || 0) > 0) {
-            const existingFinance = await client.query(
-              `select id from ${schema}.tenant_finance_ledger where id = $1 limit 1 for update`,
-              [finance.idempotencyKey],
+            const now = Date.now();
+            const claimedFinance = await insertOperationalRecordLocation(
+              client, schema, 'tenant_finance_ledger_index', 'id', finance.idempotencyKey, now,
             );
-            if (!existingFinance.rowCount) {
-              const now = Date.now();
+            if (claimedFinance) {
               const amountCents = Number(finance.amountCents || 0);
               const delta = finance.direction === 'credit' ? amountCents : -amountCents;
               const balanceResult = await client.query(
@@ -2704,57 +2972,7 @@ export function createPostgresOperationalRepository(
             }
           }
 
-          const record = input.taskRecord;
-          await client.query(
-            `
-              insert into ${schema}.task_master (
-                task_id, request_id, tenant_id, api_key_id, channel_id, upstream_id, operation, status,
-                provider_id, model, prompt_preview, created_at, updated_at, completed_at,
-                request_payload, response_payload, error_payload, billed_credits
-              ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16::jsonb,$17::jsonb,$18)
-              on conflict (task_id) do update set
-                request_id = excluded.request_id,
-                tenant_id = excluded.tenant_id,
-                api_key_id = excluded.api_key_id,
-                channel_id = excluded.channel_id,
-                upstream_id = excluded.upstream_id,
-                operation = excluded.operation,
-                status = excluded.status,
-                provider_id = excluded.provider_id,
-                model = excluded.model,
-                prompt_preview = excluded.prompt_preview,
-                updated_at = excluded.updated_at,
-                completed_at = excluded.completed_at,
-                request_payload = excluded.request_payload,
-                response_payload = excluded.response_payload,
-                error_payload = excluded.error_payload,
-                billed_credits = excluded.billed_credits
-            `,
-            [
-              record.taskId,
-              record.requestId,
-              record.tenantId,
-              record.apiKeyId,
-              record.channelId,
-              record.upstreamId || null,
-              record.operation,
-              record.status,
-              record.providerId || null,
-              record.model,
-              record.promptPreview,
-              record.createdAt,
-              record.updatedAt,
-              record.completedAt || null,
-              JSON.stringify({
-                ...(record.requestPayload || {}),
-                _provider_source: record.providerSource || null,
-                _provider_base_url: record.providerBaseUrl || null,
-              }),
-              JSON.stringify(record.responsePayload || null),
-              record.errorPayload ? JSON.stringify(record.errorPayload) : null,
-              record.billedCredits ?? null,
-            ],
-          );
+          await upsertTaskMasterRecord(client, schema, input.taskRecord);
           await client.query('commit');
         } catch (error) {
           await rollbackQuietly(client);
@@ -2766,61 +2984,30 @@ export function createPostgresOperationalRepository(
     },
     async upsertTask(record: TaskMasterRecord) {
       await ensureOperationalTables(pool, schema);
-      await pool.query(
-        `
-          insert into ${schema}.task_master (
-            task_id, request_id, tenant_id, api_key_id, channel_id, upstream_id, operation, status,
-            provider_id, model, prompt_preview, created_at, updated_at, completed_at,
-            request_payload, response_payload, error_payload, billed_credits
-          ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16::jsonb,$17::jsonb,$18)
-          on conflict (task_id) do update set
-            request_id = excluded.request_id,
-            tenant_id = excluded.tenant_id,
-            api_key_id = excluded.api_key_id,
-            channel_id = excluded.channel_id,
-            upstream_id = excluded.upstream_id,
-            operation = excluded.operation,
-            status = excluded.status,
-            provider_id = excluded.provider_id,
-            model = excluded.model,
-            prompt_preview = excluded.prompt_preview,
-            updated_at = excluded.updated_at,
-            completed_at = excluded.completed_at,
-            request_payload = excluded.request_payload,
-            response_payload = excluded.response_payload,
-            error_payload = excluded.error_payload,
-            billed_credits = excluded.billed_credits
-        `,
-        [
-          record.taskId,
-          record.requestId,
-          record.tenantId,
-          record.apiKeyId,
-          record.channelId,
-          record.upstreamId || null,
-          record.operation,
-          record.status,
-          record.providerId || null,
-          record.model,
-          record.promptPreview,
-          record.createdAt,
-          record.updatedAt,
-          record.completedAt || null,
-          JSON.stringify({
-            ...(record.requestPayload || {}),
-            _provider_source: record.providerSource || null,
-            _provider_base_url: record.providerBaseUrl || null,
-          }),
-          JSON.stringify(record.responsePayload || null),
-          record.errorPayload ? JSON.stringify(record.errorPayload) : null,
-          record.billedCredits ?? null,
-        ],
-      );
-      return record;
+      await ensureOperationalMonthlyPartition(pool, schema, 'task_master', normalizeOperationalPartitionTimestamp(record.createdAt));
+      const client = await (pool as unknown as { connect: () => Promise<PgClient> }).connect();
+      try {
+        await client.query('begin');
+        const persisted = await upsertTaskMasterRecord(client, schema, record);
+        await client.query('commit');
+        return persisted;
+      } catch (error) {
+        await rollbackQuietly(client);
+        throw error;
+      } finally {
+        client.release();
+      }
     },
     async getTask(taskId: string) {
       await ensureOperationalTables(pool, schema);
-      const result = await pool.query(`select * from ${schema}.task_master where task_id = $1 limit 1`, [taskId]);
+      const location = await findOperationalRecordLocation(pool, schema, 'task_master_index', 'task_id', taskId);
+      if (!location) {
+        return null;
+      }
+      const result = await pool.query(
+        `select * from ${schema}.task_master where task_id = $1 and created_at = $2 limit 1`,
+        [taskId, location.createdAt],
+      );
       if (!result.rowCount) {
         return null;
       }

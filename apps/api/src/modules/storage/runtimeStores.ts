@@ -58,20 +58,29 @@ export async function updateHotProviderRuntime(
 }
 
 export async function refreshHotConcurrencyCounters(keys: string[]) {
-  if (!redisStore || !keys.length) {
+  if (!keys.length) {
     return;
   }
   const uniqueKeys = Array.from(new Set(keys.map((item) => String(item || '').trim()).filter(Boolean)));
   try {
-    const counters = await redisStore.getConcurrencyCounters(uniqueKeys);
-    for (const { key, counter } of counters) {
-      if (counter) {
-        const ttlSeconds = counter.expiresAt && counter.expiresAt > Date.now()
-          ? Math.max(1, Math.ceil((counter.expiresAt - Date.now()) / 1000))
+    // Real request concurrency now uses independent Redis leases. Read the
+    // aggregate through the lease store so routing and admin diagnostics see
+    // the same count that admission enforces. The legacy JSON counter remains
+    // included while older PM2 workers drain during a rolling deployment.
+    const counters = hotStateAtomicCounters
+      ? await hotStateAtomicCounters.inspectConcurrencyLeases(uniqueKeys)
+      : redisStore
+        ? await redisStore.getConcurrencyCounters(uniqueKeys)
+        : [];
+    for (const item of counters) {
+      const state = 'state' in item ? item.state : item.counter;
+      if (state) {
+        const ttlSeconds = state.expiresAt && state.expiresAt > Date.now()
+          ? Math.max(1, Math.ceil((state.expiresAt - Date.now()) / 1000))
           : undefined;
-        baseStore.setConcurrencyCounter(key, counter, ttlSeconds);
+        baseStore.setConcurrencyCounter(item.key, state, ttlSeconds);
       } else {
-        baseStore.deleteConcurrencyCounter(key);
+        baseStore.deleteConcurrencyCounter(item.key);
       }
     }
   } catch {

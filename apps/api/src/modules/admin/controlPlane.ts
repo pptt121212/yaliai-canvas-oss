@@ -106,7 +106,7 @@ const defaultControlPlaneConfig: AdminControlPlaneConfig = {
   analytics: {
     operationalRollupEnabled: false,
     operationalRollupIntervalMinutes: Math.max(15, Math.floor(Number(process.env.OPERATIONAL_ROLLUP_INTERVAL_MS || 6 * 60 * 60 * 1000) / 60_000)),
-    operationalRollupLookbackDays: Math.max(1, Math.min(90, Number(process.env.OPERATIONAL_ROLLUP_LOOKBACK_DAYS || 14))),
+    operationalRollupLookbackDays: Math.max(1, Math.min(3, Number(process.env.OPERATIONAL_ROLLUP_LOOKBACK_DAYS || 2))),
   },
 };
 
@@ -217,7 +217,7 @@ function mergeWithDefaults(input: Partial<AdminControlPlaneConfig> | null | unde
       operationalRollupLookbackDays: Math.max(
         1,
         Math.min(
-          90,
+        3,
           Math.floor(Number(analytics.operationalRollupLookbackDays ?? defaultControlPlaneConfig.analytics.operationalRollupLookbackDays)),
         ),
       ),

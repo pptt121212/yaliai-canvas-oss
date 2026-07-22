@@ -90,6 +90,19 @@ export function createConcurrencyService(store: HotStateStore) {
       store.setConcurrencyCounter(key, next, ttlSeconds);
       return next;
     },
+    renew(key: string, ttlSeconds = 300) {
+      const current = store.getConcurrencyCounter(key);
+      if (!current || current.current <= 0) {
+        return null;
+      }
+      const next = {
+        ...current,
+        updatedAt: Date.now(),
+        expiresAt: Date.now() + ttlSeconds * 1000,
+      };
+      store.setConcurrencyCounter(key, next, ttlSeconds);
+      return next;
+    },
     clear(key: string) {
       store.deleteConcurrencyCounter(key);
     },

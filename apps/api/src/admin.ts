@@ -124,7 +124,7 @@ const controlPlaneSchema = z.object({
   analytics: z.object({
     operationalRollupEnabled: z.boolean(),
     operationalRollupIntervalMinutes: z.number().int().min(15).max(24 * 60),
-    operationalRollupLookbackDays: z.number().int().min(1).max(90),
+    operationalRollupLookbackDays: z.number().int().min(1).max(3),
   }).optional(),
 });
 

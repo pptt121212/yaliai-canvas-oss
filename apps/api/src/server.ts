@@ -38,6 +38,11 @@ import { resolveImageCapabilityCost } from './modules/imageCapabilityMatrix.js';
 import { dynamicOverloadGuard } from './modules/runtime/dynamicOverloadGuard.js';
 import { gatewayInstanceId } from './modules/runtime/gatewayIdentity.js';
 import {
+  createDownstreamCancellation,
+  isDownstreamClientDisconnectedError,
+  throwIfDownstreamCancelled,
+} from './modules/runtime/downstreamCancellation.js';
+import {
   isPassiveRecoveryReentryProvider,
   passiveRecoveryReentryIntervalSeconds,
 } from './modules/routing/passiveRecovery.js';
@@ -154,7 +159,7 @@ const canvasReferenceAssetRetentionMs = resolveRetentionMs('CANVAS_REFERENCE_ASS
 const operationalMaintenanceIntervalMs = Math.max(60_000, Number(process.env.OPERATIONAL_MAINTENANCE_INTERVAL_MS || 5 * 60 * 1000));
 const operationalRollupHardDisabled = String(process.env.OPERATIONAL_ROLLUP_ENABLED || '').trim().toLowerCase() === 'false';
 const operationalRollupIntervalMs = Math.max(15 * 60 * 1000, Number(process.env.OPERATIONAL_ROLLUP_INTERVAL_MS || 6 * 60 * 60 * 1000));
-const operationalRollupLookbackDays = Math.max(1, Math.min(90, Number(process.env.OPERATIONAL_ROLLUP_LOOKBACK_DAYS || 14)));
+const operationalRollupLookbackDays = Math.max(1, Math.min(3, Number(process.env.OPERATIONAL_ROLLUP_LOOKBACK_DAYS || 2)));
 const operationalRollupBucketMs = Math.max(60 * 60 * 1000, Number(process.env.OPERATIONAL_ROLLUP_BUCKET_MS || 24 * 60 * 60 * 1000));
 const operationalRollupLockMs = Math.max(5 * 60 * 1000, Number(process.env.OPERATIONAL_ROLLUP_LOCK_MS || 30 * 60 * 1000));
 const hardMaxInputImagePayloadBytes = 12 * 1024 * 1024;
@@ -411,6 +416,15 @@ type MultipartImageSource = {
   bytes: number;
 };
 
+type AsyncTaskImageAsset = {
+  sourceRef: string;
+  assetName: string;
+  fileName: string;
+  mimeType: string;
+  extension: string;
+  bytes: number;
+};
+
 type MultipartInputSpool = {
   directory: string;
   sources: MultipartImageSource[];
@@ -497,29 +511,78 @@ function multipartImageSourcesForPayload(request: any, payload: z.infer<typeof o
   return sources.every((source): source is MultipartImageSource => Boolean(source)) ? sources : undefined;
 }
 
-async function materializeMultipartImageSources(
-  request: any,
+function resolveAsyncTaskAssetPath(assetDirectory: string | undefined, assetName: string) {
+  const directory = String(assetDirectory || '').trim();
+  const safeAssetName = sanitizeFileSegment(assetName);
+  if (!directory || !safeAssetName || safeAssetName !== assetName) {
+    return undefined;
+  }
+  const resolvedDirectory = path.resolve(directory);
+  const filePath = path.resolve(resolvedDirectory, safeAssetName);
+  return filePath.startsWith(`${resolvedDirectory}${path.sep}`) ? filePath : undefined;
+}
+
+function asyncTaskImageSourcesForPayload(input: {
+  assetDirectory?: string;
+  imageAssets?: AsyncTaskImageAsset[];
+  payload: z.infer<typeof openAIImagesSchema>;
+}) {
+  const values = input.payload.image ? (Array.isArray(input.payload.image) ? input.payload.image : [input.payload.image]) : [];
+  if (!values.length || !input.imageAssets?.length) {
+    return undefined;
+  }
+  const assetsBySourceRef = new Map(input.imageAssets.map((asset) => [asset.sourceRef, asset]));
+  const sources = values.map((value) => {
+    const asset = assetsBySourceRef.get(String(value || '').trim());
+    const filePath = asset ? resolveAsyncTaskAssetPath(input.assetDirectory, asset.assetName) : undefined;
+    return asset && filePath
+      ? {
+          sourceRef: asset.sourceRef,
+          filePath,
+          fileName: asset.fileName,
+          mimeType: asset.mimeType,
+          extension: asset.extension,
+          bytes: asset.bytes,
+        }
+      : undefined;
+  });
+  return sources.every((source): source is MultipartImageSource => Boolean(source)) ? sources : undefined;
+}
+
+function imageFileSourcesForPayload(input: {
+  request: any;
+  payload: z.infer<typeof openAIImagesSchema>;
+  asyncTaskAssetDirectory?: string;
+  asyncTaskImageAssets?: AsyncTaskImageAsset[];
+}) {
+  return multipartImageSourcesForPayload(input.request, input.payload)
+    || asyncTaskImageSourcesForPayload({
+      assetDirectory: input.asyncTaskAssetDirectory,
+      imageAssets: input.asyncTaskImageAssets,
+      payload: input.payload,
+    });
+}
+
+async function materializeImageFileSources(
   payload: z.infer<typeof openAIImagesSchema>,
+  sources: MultipartImageSource[],
+  label: string,
 ): Promise<z.infer<typeof openAIImagesSchema>> {
   if (!payload.image) {
     return payload;
   }
   const values = Array.isArray(payload.image) ? payload.image : [payload.image];
-  let changed = false;
+  const sourcesByRef = new Map(sources.map((source) => [source.sourceRef, source]));
   const materialized: string[] = [];
   for (const value of values) {
-    const source = sourceForMultipartImageValue(request, value);
+    const source = sourcesByRef.get(String(value || '').trim());
     if (!source) {
-      materialized.push(value);
+      materialized.push(String(value || ''));
       continue;
     }
-    changed = true;
     const buffer = await fs.readFile(source.filePath);
-    assertBufferWithinLimit(buffer, 'multipart input spool image');
+    assertBufferWithinLimit(buffer, label);
     materialized.push(`data:${source.mimeType};base64,${buffer.toString('base64')}`);
-  }
-  if (!changed) {
-    return payload;
   }
   return {
     ...payload,
@@ -533,9 +596,10 @@ async function persistAsyncTaskMultipartAssets(
   payload: z.infer<typeof openAIImagesSchema>,
 ) {
   const values = payload.image ? (Array.isArray(payload.image) ? payload.image : [payload.image]) : [];
-  if (!values.length) return { payload, assetDirectory: '' };
+  if (!values.length) return { payload, assetDirectory: '', imageAssets: [] as AsyncTaskImageAsset[] };
   const directory = path.join(asyncTaskAssetRoot, sanitizeFileSegment(taskId));
   const nextValues: string[] = [];
+  const imageAssets: AsyncTaskImageAsset[] = [];
   let copied = false;
   for (let index = 0; index < values.length; index += 1) {
     const source = sourceForMultipartImageValue(request, values[index]);
@@ -546,36 +610,24 @@ async function persistAsyncTaskMultipartAssets(
     await fs.mkdir(directory, { recursive: true, mode: 0o700 });
     const assetName = `${index + 1}-${crypto.randomUUID()}.${source.extension}`;
     await fs.copyFile(source.filePath, path.join(directory, assetName));
-    nextValues.push(`${asyncTaskImageAssetPrefix}${assetName}`);
+    const sourceRef = `${asyncTaskImageAssetPrefix}${assetName}`;
+    nextValues.push(sourceRef);
+    imageAssets.push({
+      sourceRef,
+      assetName,
+      fileName: source.fileName,
+      mimeType: source.mimeType,
+      extension: source.extension,
+      bytes: source.bytes,
+    });
     copied = true;
   }
-  if (!copied) return { payload, assetDirectory: '' };
+  if (!copied) return { payload, assetDirectory: '', imageAssets: [] as AsyncTaskImageAsset[] };
   return {
     payload: { ...payload, image: Array.isArray(payload.image) ? nextValues : nextValues[0] },
     assetDirectory: directory,
+    imageAssets,
   };
-}
-
-async function materializeAsyncTaskImageAssets(
-  assetDirectory: string | undefined,
-  payload: z.infer<typeof openAIImagesSchema>,
-) {
-  if (!assetDirectory || !payload.image) return payload;
-  const values = Array.isArray(payload.image) ? payload.image : [payload.image];
-  const materialized: string[] = [];
-  for (const value of values) {
-    const raw = String(value || '');
-    if (!raw.startsWith(asyncTaskImageAssetPrefix)) {
-      materialized.push(raw);
-      continue;
-    }
-    const assetName = sanitizeFileSegment(raw.slice(asyncTaskImageAssetPrefix.length));
-    const filePath = path.join(assetDirectory, assetName);
-    const buffer = await fs.readFile(filePath);
-    assertBufferWithinLimit(buffer, 'async task image asset');
-    materialized.push(`data:${contentTypeForExtension(detectImageExtensionFromBuffer(buffer))};base64,${buffer.toString('base64')}`);
-  }
-  return { ...payload, image: Array.isArray(payload.image) ? materialized : materialized[0] };
 }
 
 async function spoolMultipartImageFilePart(
@@ -919,6 +971,11 @@ function payloadHasReferenceImages(payload: z.infer<typeof openAIImagesSchema>) 
   return Boolean(payload.image && (Array.isArray(payload.image) ? payload.image.length : String(payload.image).trim()));
 }
 
+function payloadHasAsyncTaskImageAssets(payload: z.infer<typeof openAIImagesSchema>) {
+  const values = payload.image ? (Array.isArray(payload.image) ? payload.image : [payload.image]) : [];
+  return values.some((value) => String(value || '').trim().startsWith(asyncTaskImageAssetPrefix));
+}
+
 function inferRequestedEditProtocol(input: {
   request?: any;
   payload: z.infer<typeof openAIImagesSchema>;
@@ -1188,6 +1245,7 @@ type AsyncQueuedTaskInternalState = {
   enqueuedAt: number;
   attemptCount: number;
   assetDirectory?: string;
+  imageAssets?: AsyncTaskImageAsset[];
 };
 
 type RequestAccessResult =
@@ -2328,13 +2386,18 @@ function inferPublicBaseUrl(request: any) {
   if (configured) {
     return configured.replace(/\/+$/, '');
   }
-  const protocolHeader = String(request.headers['x-forwarded-proto'] || '').trim();
-  const proto = protocolHeader || (request.protocol || 'http');
-  const hostHeader = String(request.headers['x-forwarded-host'] || request.headers.host || '').trim();
+  const headers = request?.headers || {};
+  const protocolHeader = String(headers['x-forwarded-proto'] || '').trim();
+  const proto = protocolHeader || (request?.protocol || 'http');
+  const hostHeader = String(headers['x-forwarded-host'] || headers.host || '').trim();
   if (hostHeader) {
     return `${proto}://${hostHeader.replace(/\/+$/, '')}`;
   }
   return `http://127.0.0.1:${port}`;
+}
+
+function buildGeneratedImageUrl(request: any, fileName: string) {
+  return `${inferPublicBaseUrl(request)}/v1/generated-images/${encodeURIComponent(fileName)}`;
 }
 
 async function persistGeneratedImageAndBuildUrl(input: {
@@ -2350,7 +2413,7 @@ async function persistGeneratedImageAndBuildUrl(input: {
   const fileName = `${sanitizeFileSegment(input.taskId)}_${input.imageIndex}.${sanitizeFileSegment(input.extension || 'png')}`;
   const filePath = path.join(dir, fileName);
   await fs.writeFile(filePath, Buffer.from(input.base64, 'base64'));
-  return `${inferPublicBaseUrl(input.request)}/v1/generated-images/${encodeURIComponent(fileName)}`;
+  return buildGeneratedImageUrl(input.request, fileName);
 }
 
 async function persistCanvasReferenceAssetAndBuildPayload(input: {
@@ -2972,6 +3035,7 @@ async function normalizeStandardImageResponseBody(input: {
   responseContentType?: string;
   bodyBinaryBase64?: string;
   bodyBinaryExtension?: string;
+  bodyBinaryFileName?: string;
   responseFormat?: DownstreamImageResponseFormat;
   outputFormat?: string;
   requestedImageCount?: number;
@@ -2982,7 +3046,7 @@ async function normalizeStandardImageResponseBody(input: {
   allowDirectPublicImageUrl?: boolean;
 }) {
   const normalizedContentType = String(input.responseContentType || '').toLowerCase();
-  if (normalizedContentType.startsWith('image/') && input.bodyBinaryBase64) {
+  if (normalizedContentType.startsWith('image/') && (input.bodyBinaryBase64 || input.bodyBinaryFileName)) {
     const extension = input.bodyBinaryExtension || (
       normalizedContentType.includes('jpeg') || normalizedContentType.includes('jpg')
         ? 'jpg'
@@ -2997,7 +3061,15 @@ async function normalizeStandardImageResponseBody(input: {
       data: await rewriteImageDataItemsToRequestedFormat({
         request: input.request,
         taskId: input.taskId,
-        data: [{ b64_json: input.bodyBinaryBase64, __extension_hint: extension }],
+        data: [input.bodyBinaryFileName
+          ? {
+              url: buildGeneratedImageUrl(input.request, input.bodyBinaryFileName),
+              __extension_hint: extension,
+            }
+          : {
+              b64_json: input.bodyBinaryBase64,
+              __extension_hint: extension,
+            }],
         responseFormat: input.responseFormat,
         outputFormat: input.outputFormat,
         allowDirectPublicImageUrl: input.allowDirectPublicImageUrl,
@@ -3109,7 +3181,12 @@ async function executeUpstreamImageRequest(input: {
   payload: z.infer<typeof openAIImagesSchema>;
   operation: 'generations' | 'edits';
   accessContext: RequestAccessContext;
+  asyncTaskAssetDirectory?: string;
+  asyncTaskImageAssets?: AsyncTaskImageAsset[];
+  streamBinaryResponseToUrl?: boolean;
+  downstreamAbortSignal?: AbortSignal;
 }) {
+  throwIfDownstreamCancelled(input.downstreamAbortSignal);
   const preview = await buildSmartExecutionPreview(input);
   if (!preview.candidates.length) {
     return null;
@@ -3147,6 +3224,7 @@ async function executeUpstreamImageRequest(input: {
     : preview.candidates;
 
   for (let candidateIndex = 0; candidateIndex < executionCandidates.length; candidateIndex += 1) {
+    throwIfDownstreamCancelled(input.downstreamAbortSignal);
     const candidateInput = executionCandidates[candidateIndex]!;
     let candidate: PreparedRoutedImageExecutionCandidate;
     try {
@@ -3161,6 +3239,7 @@ async function executeUpstreamImageRequest(input: {
       });
       continue;
     }
+    throwIfDownstreamCancelled(input.downstreamAbortSignal);
     const sameProviderRetryAttempt = retrySoleProvider ? candidateIndex : undefined;
     const sameProviderRetryLimit = retrySoleProvider ? maxSoleProviderRetries : undefined;
     if (sameProviderRetryAttempt && sameProviderRetryAttempt > 0) {
@@ -3173,7 +3252,7 @@ async function executeUpstreamImageRequest(input: {
     );
     const attemptStartedAt = Date.now();
     const requestTimeoutMs = resolveProviderRequestTimeoutMs(candidate.provider);
-    let providerConcurrencyKey: string | null = null;
+    let providerConcurrencyKey: RuntimeConcurrencyLease | null = null;
     try {
       const providerConcurrency = await acquireProviderConcurrency(candidate.provider, requestTimeoutMs);
       if (!providerConcurrency.allowed) {
@@ -3212,6 +3291,7 @@ async function executeUpstreamImageRequest(input: {
             bodyText: 'Provider concurrency limit reached before upstream request.',
             bodyBinaryBase64: undefined,
             bodyBinaryExtension: undefined,
+            bodyBinaryFileName: undefined,
             bodyJson: {
               error: 'provider_concurrency_limit_reached',
               message: 'Provider concurrency limit reached before upstream request.',
@@ -3240,6 +3320,9 @@ async function executeUpstreamImageRequest(input: {
       const response = await fetchUpstreamAttempt({
         requestPlan: candidate.requestPlan,
         timeoutMs: requestTimeoutMs,
+        downstreamAbortSignal: input.downstreamAbortSignal,
+        streamBinaryResponseToUrl: input.streamBinaryResponseToUrl
+          ?? resolveDownstreamImageResponseFormat(input.payload) === 'url',
       });
       lastResult = {
         resolved: {
@@ -3269,6 +3352,7 @@ async function executeUpstreamImageRequest(input: {
         bodyJson: response.bodyJson,
         bodyText: response.bodyText,
         bodyBinaryBase64: response.bodyBinaryBase64,
+        bodyBinaryFileName: response.bodyBinaryFileName,
       })) {
         providerAttempts.push(buildProviderAttemptTrace({
           candidate,
@@ -3390,6 +3474,9 @@ async function executeUpstreamImageRequest(input: {
         return lastResult;
       }
     } catch (error) {
+      if (isDownstreamClientDisconnectedError(error)) {
+        throw error;
+      }
       lastError = error;
       const failure = classifyUpstreamFailure({
         fetchError: error,
@@ -3434,6 +3521,7 @@ async function executeUpstreamImageRequest(input: {
           bodyText: error instanceof Error ? error.message : 'upstream_fetch_failed',
           bodyBinaryBase64: undefined,
           bodyBinaryExtension: undefined,
+          bodyBinaryFileName: undefined,
           bodyJson: {
             error: 'upstream_fetch_failed',
             message: error instanceof Error ? error.message : 'Unknown upstream fetch failure.',
@@ -3917,6 +4005,7 @@ function readQueuedTaskInternalState(task: ImageGatewayTaskState): AsyncQueuedTa
     return null;
   }
   const rawHeaders = (internal as Record<string, unknown>).requestHeaders;
+  const rawImageAssets = (internal as Record<string, unknown>).imageAssets;
   const requestHeaders = rawHeaders && typeof rawHeaders === 'object' && !Array.isArray(rawHeaders)
     ? Object.fromEntries(
         Object.entries(rawHeaders as Record<string, unknown>)
@@ -3930,6 +4019,26 @@ function readQueuedTaskInternalState(task: ImageGatewayTaskState): AsyncQueuedTa
     enqueuedAt: Number((internal as Record<string, unknown>).enqueuedAt || task.created_at || Date.now()),
     attemptCount: Math.max(0, Number((internal as Record<string, unknown>).attemptCount || 0)),
     assetDirectory: String((internal as Record<string, unknown>).assetDirectory || '').trim() || undefined,
+    imageAssets: Array.isArray(rawImageAssets)
+      ? rawImageAssets
+        .filter((asset): asset is Record<string, unknown> => Boolean(asset) && typeof asset === 'object' && !Array.isArray(asset))
+        .map((asset) => ({
+          sourceRef: String(asset.sourceRef || '').trim(),
+          assetName: String(asset.assetName || '').trim(),
+          fileName: normalizeIncomingMultipartImageFileName(asset.fileName),
+          mimeType: String(asset.mimeType || '').trim(),
+          extension: sanitizeFileSegment(String(asset.extension || '').trim()),
+          bytes: Math.max(0, Number(asset.bytes || 0)),
+        }))
+        .filter((asset) => (
+          asset.sourceRef.startsWith(asyncTaskImageAssetPrefix)
+          && Boolean(resolveAsyncTaskAssetPath(String((internal as Record<string, unknown>).assetDirectory || ''), asset.assetName))
+          && Boolean(asset.fileName)
+          && Boolean(asset.mimeType)
+          && Boolean(asset.extension)
+          && asset.bytes > 0
+        ))
+      : undefined,
   };
 }
 
@@ -3941,6 +4050,7 @@ function writeQueuedTaskInternalState(task: ImageGatewayTaskState, state: AsyncQ
     enqueuedAt: state.enqueuedAt,
     attemptCount: state.attemptCount,
     assetDirectory: state.assetDirectory || '',
+    imageAssets: state.imageAssets || [],
   };
 }
 
@@ -4238,6 +4348,8 @@ async function preparePayloadAndRequestPlanForProvider(input: {
   payload: z.infer<typeof openAIImagesSchema>;
   provider: ProviderConfig;
   operation: 'generations' | 'edits';
+  asyncTaskAssetDirectory?: string;
+  asyncTaskImageAssets?: AsyncTaskImageAsset[];
 }) {
   let payload = await adaptPayloadForProvider({
     request: input.request,
@@ -4245,12 +4357,21 @@ async function preparePayloadAndRequestPlanForProvider(input: {
     provider: input.provider,
   });
   let requestPlan = await buildImageRequestPlanForProvider(input.provider, input.operation, payload) as UpstreamImageRequestPlan;
-  const multipartSources = multipartImageSourcesForPayload(input.request, payload);
+  const multipartSources = imageFileSourcesForPayload({
+    request: input.request,
+    payload,
+    asyncTaskAssetDirectory: input.asyncTaskAssetDirectory,
+    asyncTaskImageAssets: input.asyncTaskImageAssets,
+  });
 
   // Multipart sources stay as files for multipart upstreams. Other protocols
   // materialize them only when their JSON body is actually selected.
   if (multipartSources?.length && requestPlan.bodyFormat !== 'multipart') {
-    const materializedPayload = await materializeMultipartImageSources(input.request, input.payload);
+    const materializedPayload = await materializeImageFileSources(
+      input.payload,
+      multipartSources,
+      input.asyncTaskAssetDirectory ? 'async task image asset' : 'multipart input spool image',
+    );
     payload = await adaptPayloadForProvider({
       request: input.request,
       payload: materializedPayload,
@@ -4484,18 +4605,111 @@ function buildApiKeyConcurrencyKey(accessContext: RequestAccessContext) {
   return `api-key:${accessContext.apiKeyId}:image`;
 }
 
+type RuntimeConcurrencyLease = {
+  key: string;
+  ttlSeconds: number;
+  backend: 'redis_lease' | 'local_counter';
+  leaseId?: string;
+  heartbeat?: ReturnType<typeof setInterval>;
+  released?: boolean;
+};
+
+const runtimeConcurrencyLeaseTtlSeconds = 90;
+
+async function renewRuntimeConcurrencyLease(lease: RuntimeConcurrencyLease) {
+  if (lease.released) {
+    return false;
+  }
+  if (lease.backend === 'redis_lease' && lease.leaseId && hotStateAtomicCounters) {
+    const result = await hotStateAtomicCounters.renewConcurrencyLease({
+      key: lease.key,
+      leaseId: lease.leaseId,
+      ttlSeconds: lease.ttlSeconds,
+    });
+    return result.allowed;
+  }
+  return Boolean(concurrencyService.renew(lease.key, lease.ttlSeconds));
+}
+
+function startRuntimeConcurrencyLeaseHeartbeat(lease: RuntimeConcurrencyLease) {
+  const intervalMs = Math.max(5_000, Math.floor(lease.ttlSeconds * 1000 / 3));
+  lease.heartbeat = setInterval(() => {
+    void renewRuntimeConcurrencyLease(lease).then((renewed) => {
+      if (!renewed && !lease.released) {
+        requestLogWarn('runtime_concurrency_lease_renew_lost', { key: lease.key });
+      }
+    }).catch((error) => {
+      // Existing work may finish while Redis is briefly unavailable. New work
+      // remains protected by strict shared-state admission on its next claim.
+      requestLogWarn('runtime_concurrency_lease_renew_failed', error);
+    });
+  }, intervalMs);
+  lease.heartbeat.unref?.();
+  return lease;
+}
+
+async function acquireRuntimeConcurrencyLease(
+  key: string,
+  max: number,
+  ttlSeconds = runtimeConcurrencyLeaseTtlSeconds,
+  forceLocal = false,
+) {
+  const normalizedMax = Math.max(1, Math.floor(max));
+  const normalizedTtlSeconds = Math.max(5, Math.floor(ttlSeconds));
+  if (hotStateAtomicCounters && !forceLocal) {
+    const result = await hotStateAtomicCounters.acquireConcurrencyLease(key, normalizedMax, normalizedTtlSeconds);
+    const lease = result.lease
+      ? startRuntimeConcurrencyLeaseHeartbeat({
+          key,
+          ttlSeconds: normalizedTtlSeconds,
+          backend: 'redis_lease',
+          leaseId: result.lease.leaseId,
+        })
+      : null;
+    return { allowed: result.allowed, key: lease, state: result.state };
+  }
+  const result = concurrencyService.acquire(key, normalizedMax, normalizedTtlSeconds);
+  const lease = result.allowed
+    ? startRuntimeConcurrencyLeaseHeartbeat({
+        key,
+        ttlSeconds: normalizedTtlSeconds,
+        backend: 'local_counter',
+      })
+    : null;
+  return { allowed: result.allowed, key: lease, state: result.state };
+}
+
+async function releaseRuntimeConcurrencyLease(lease: RuntimeConcurrencyLease | null, forceLocal = false) {
+  if (!lease) {
+    return;
+  }
+  lease.released = true;
+  if (lease.heartbeat) {
+    clearInterval(lease.heartbeat);
+  }
+  if (lease.backend === 'redis_lease' && lease.leaseId && hotStateAtomicCounters && !forceLocal) {
+    await hotStateAtomicCounters.releaseConcurrencyLease({
+      key: lease.key,
+      leaseId: lease.leaseId,
+      ttlSeconds: lease.ttlSeconds,
+    });
+    return;
+  }
+  concurrencyService.release(lease.key, Math.min(120, lease.ttlSeconds));
+}
+
 async function acquireApiKeyConcurrency(accessContext: RequestAccessContext) {
   const key = buildApiKeyConcurrencyKey(accessContext);
   if (!key || !accessContext.maxConcurrency) {
-    return { allowed: true as const, key: null as string | null };
+    return { allowed: true as const, key: null as RuntimeConcurrencyLease | null };
   }
   const max = Math.max(1, Number(accessContext.maxConcurrency || 1));
   if (hotStateAtomicCounters) {
     try {
-      const result = await hotStateAtomicCounters.acquireConcurrency(key, max, 900);
+      const result = await acquireRuntimeConcurrencyLease(key, max);
       return {
         allowed: result.allowed,
-        key,
+        key: result.key,
         state: result.state,
       };
     } catch (error) {
@@ -4505,10 +4719,10 @@ async function acquireApiKeyConcurrency(accessContext: RequestAccessContext) {
       requestLogWarn('redis_atomic_api_key_concurrency_fallback', error);
     }
   }
-  const result = concurrencyService.acquire(key, max, 900);
+  const result = await acquireRuntimeConcurrencyLease(key, max, runtimeConcurrencyLeaseTtlSeconds, true);
   return {
     allowed: result.allowed,
-    key,
+    key: result.key,
     state: result.state,
   };
 }
@@ -4657,34 +4871,34 @@ async function consumeImageRateLimits(accessContext: RequestAccessContext) {
   };
 }
 
-async function releaseApiKeyConcurrency(key: string | null) {
-  if (!key) {
+async function releaseApiKeyConcurrency(lease: RuntimeConcurrencyLease | null) {
+  if (!lease) {
     return;
   }
   if (hotStateAtomicCounters) {
     try {
-      await hotStateAtomicCounters.releaseConcurrency(key, 120);
+      await releaseRuntimeConcurrencyLease(lease);
       return;
     } catch (error) {
       requestLogWarn('redis_atomic_api_key_concurrency_release_fallback', error);
     }
   }
-  concurrencyService.release(key, 120);
+  await releaseRuntimeConcurrencyLease(lease, true);
 }
 
 async function acquireGlobalImageConcurrency() {
   const controlPlane = adminControlPlaneStore.get();
   const max = Math.max(0, Math.floor(Number(controlPlane.publicApi.maxConcurrency || 0)));
   if (max <= 0) {
-    return { allowed: true as const, key: null as string | null };
+    return { allowed: true as const, key: null as RuntimeConcurrencyLease | null };
   }
   const key = buildGlobalImageConcurrencyKey();
   if (hotStateAtomicCounters) {
     try {
-      const result = await hotStateAtomicCounters.acquireConcurrency(key, max, 900);
+      const result = await acquireRuntimeConcurrencyLease(key, max);
       return {
         allowed: result.allowed,
-        key,
+        key: result.key,
         state: result.state,
         max,
       };
@@ -4695,10 +4909,10 @@ async function acquireGlobalImageConcurrency() {
       requestLogWarn('redis_atomic_global_image_concurrency_fallback', error);
     }
   }
-  const result = concurrencyService.acquire(key, max, 900);
+  const result = await acquireRuntimeConcurrencyLease(key, max, runtimeConcurrencyLeaseTtlSeconds, true);
   return {
     allowed: result.allowed,
-    key,
+    key: result.key,
     state: result.state,
     max,
   };
@@ -4760,22 +4974,22 @@ async function buildCanvasUserSessionPayload(input: {
   });
 }
 
-async function releaseGlobalImageConcurrency(key: string | null) {
-  if (!key) {
+async function releaseGlobalImageConcurrency(lease: RuntimeConcurrencyLease | null) {
+  if (!lease) {
     return;
   }
   if (hotStateAtomicCounters) {
     try {
-      await hotStateAtomicCounters.releaseConcurrency(key, 120);
+      await releaseRuntimeConcurrencyLease(lease);
       return;
     } catch (error) {
       requestLogWarn('redis_atomic_global_image_concurrency_release_fallback', error);
     }
   }
-  concurrencyService.release(key, 120);
+  await releaseRuntimeConcurrencyLease(lease, true);
 }
 
-async function releaseImageConcurrency(apiKeyConcurrencyKey: string | null, globalConcurrencyKey: string | null) {
+async function releaseImageConcurrency(apiKeyConcurrencyKey: RuntimeConcurrencyLease | null, globalConcurrencyKey: RuntimeConcurrencyLease | null) {
   await Promise.all([
     releaseApiKeyConcurrency(apiKeyConcurrencyKey),
     releaseGlobalImageConcurrency(globalConcurrencyKey),
@@ -4921,19 +5135,21 @@ function resolveProviderConcurrencyMax(provider: ProviderConfig) {
   return Math.max(1, Math.floor(value));
 }
 
-async function acquireProviderConcurrency(provider: ProviderConfig, ttlMs: number) {
+async function acquireProviderConcurrency(provider: ProviderConfig, _ttlMs: number) {
   const max = resolveProviderConcurrencyMax(provider);
   if (!max) {
-    return { allowed: true as const, key: null as string | null };
+    return { allowed: true as const, key: null as RuntimeConcurrencyLease | null };
   }
   const key = `provider:${provider.providerId}`;
-  const ttlSeconds = Math.max(60, Math.ceil(ttlMs / 1000) + 60);
+  // A short lease plus heartbeat recovers abandoned slots quickly while still
+  // allowing the configured upstream timeout to run to completion.
+  const ttlSeconds = runtimeConcurrencyLeaseTtlSeconds;
   if (hotStateAtomicCounters) {
     try {
-      const result = await hotStateAtomicCounters.acquireConcurrency(key, max, ttlSeconds);
+      const result = await acquireRuntimeConcurrencyLease(key, max, ttlSeconds);
       return {
         allowed: result.allowed,
-        key,
+        key: result.key,
         state: result.state,
         max,
       };
@@ -4944,28 +5160,28 @@ async function acquireProviderConcurrency(provider: ProviderConfig, ttlMs: numbe
       requestLogWarn('redis_atomic_provider_concurrency_fallback', error);
     }
   }
-  const result = concurrencyService.acquire(key, max, ttlSeconds);
+  const result = await acquireRuntimeConcurrencyLease(key, max, ttlSeconds, true);
   return {
     allowed: result.allowed,
-    key,
+    key: result.key,
     state: result.state,
     max,
   };
 }
 
-async function releaseProviderConcurrency(key: string | null) {
-  if (!key) {
+async function releaseProviderConcurrency(lease: RuntimeConcurrencyLease | null) {
+  if (!lease) {
     return;
   }
   if (hotStateAtomicCounters) {
     try {
-      await hotStateAtomicCounters.releaseConcurrency(key, 120);
+      await releaseRuntimeConcurrencyLease(lease);
       return;
     } catch (error) {
       requestLogWarn('redis_atomic_provider_concurrency_release_fallback', error);
     }
   }
-  concurrencyService.release(key, 120);
+  await releaseRuntimeConcurrencyLease(lease, true);
 }
 
 function resolveProviderRequestTimeoutMs(provider: ProviderConfig) {
@@ -5047,16 +5263,38 @@ function buildRoutingSummary(input: {
   };
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number) {
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number, downstreamAbortSignal?: AbortSignal) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error(`Upstream request timed out after ${timeoutMs}ms.`)), timeoutMs);
+  const abortForDownstreamDisconnect = () => {
+    controller.abort(downstreamAbortSignal?.reason);
+  };
+  if (downstreamAbortSignal?.aborted) {
+    abortForDownstreamDisconnect();
+  } else {
+    downstreamAbortSignal?.addEventListener('abort', abortForDownstreamDisconnect, { once: true });
+  }
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) {
+      return;
+    }
+    disposed = true;
+    clearTimeout(timer);
+    downstreamAbortSignal?.removeEventListener('abort', abortForDownstreamDisconnect);
+  };
   try {
-    return await fetch(url, {
+    const response = await fetch(url, {
       ...init,
       signal: controller.signal,
     });
-  } finally {
-    clearTimeout(timer);
+    return { response, dispose };
+  } catch (error) {
+    dispose();
+    if (downstreamAbortSignal?.aborted) {
+      throwIfDownstreamCancelled(downstreamAbortSignal);
+    }
+    throw error;
   }
 }
 
@@ -5067,10 +5305,6 @@ function assertContentLengthWithinLimit(response: Response, limitBytes: number, 
     (error as Error & { statusCode?: number }).statusCode = 413;
     throw error;
   }
-}
-
-async function readResponseArrayBufferWithLimit(response: Response, limitBytes: number, label: string) {
-  return (await readResponseBufferWithLimit(response, limitBytes, label)).buffer;
 }
 
 async function readResponseTextWithLimit(response: Response, limitBytes: number, label: string) {
@@ -5103,6 +5337,65 @@ async function readResponseBufferWithLimit(response: Response, limitBytes: numbe
   return Buffer.concat(chunks, total);
 }
 
+async function streamResponseToGeneratedImageFile(response: Response, limitBytes: number, label: string) {
+  assertContentLengthWithinLimit(response, limitBytes, label);
+  if (!response.body) {
+    throw new Error(`${label} has no response body.`);
+  }
+  const dir = getGeneratedImageDir();
+  await fs.mkdir(dir, { recursive: true });
+  const token = crypto.randomUUID();
+  const temporaryPath = path.join(dir, `.upstream-${token}.part`);
+  const handle = await fs.open(temporaryPath, 'wx', 0o600);
+  const reader = response.body.getReader();
+  const headerChunks: Buffer[] = [];
+  let headerBytes = 0;
+  let totalBytes = 0;
+  let finalizedFilePath = '';
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      const chunk = Buffer.from(next.value);
+      totalBytes += chunk.length;
+      if (totalBytes > limitBytes) {
+        await reader.cancel(`${label} exceeds maximum response size.`).catch(() => undefined);
+        const error = new Error(`${label} exceeds maximum response size of ${limitBytes} bytes.`);
+        (error as Error & { statusCode?: number }).statusCode = 413;
+        throw error;
+      }
+      let offset = 0;
+      while (offset < chunk.length) {
+        const { bytesWritten } = await handle.write(chunk, offset, chunk.length - offset);
+        if (bytesWritten <= 0) {
+          throw new Error(`Failed to write ${label} to disk.`);
+        }
+        offset += bytesWritten;
+      }
+      if (headerBytes < 32) {
+        const prefix = chunk.subarray(0, Math.min(chunk.length, 32 - headerBytes));
+        headerChunks.push(prefix);
+        headerBytes += prefix.length;
+      }
+    }
+    if (!totalBytes) {
+      throw new Error(`${label} is empty.`);
+    }
+    await handle.close();
+    const extension = detectImageExtensionFromBuffer(Buffer.concat(headerChunks, headerBytes));
+    const fileName = `upstream_${token}.${extension}`;
+    finalizedFilePath = path.join(dir, fileName);
+    await fs.rename(temporaryPath, finalizedFilePath);
+    return { fileName, extension, bytes: totalBytes };
+  } catch (error) {
+    await fs.rm(finalizedFilePath || temporaryPath, { force: true }).catch(() => undefined);
+    throw error;
+  } finally {
+    reader.releaseLock();
+    await handle.close().catch(() => undefined);
+  }
+}
+
 function resolveChatRequestTimeoutMs(provider?: ProviderConfig) {
   const configuredMs = Number(provider?.metadata?.chat_request_timeout_ms || provider?.metadata?.request_timeout_ms || 0);
   if (configuredMs > 0) {
@@ -5122,6 +5415,8 @@ function resolveChatRequestTimeoutMs(provider?: ProviderConfig) {
 async function fetchUpstreamAttempt(input: {
   requestPlan: UpstreamImageRequestPlan;
   timeoutMs: number;
+  streamBinaryResponseToUrl?: boolean;
+  downstreamAbortSignal?: AbortSignal;
 }) {
   const requestBody = await buildUpstreamFetchBody({
     bodyFormat: input.requestPlan.bodyFormat,
@@ -5130,43 +5425,63 @@ async function fetchUpstreamAttempt(input: {
     multipartFileSources: input.requestPlan.multipartFileSources,
   });
 
-  const response = await fetchWithTimeout(input.requestPlan.url, {
+  const upstreamFetch = await fetchWithTimeout(input.requestPlan.url, {
     method: input.requestPlan.method,
     headers: input.requestPlan.headers,
     body: requestBody,
-  }, input.timeoutMs);
-  const responseContentType = String(response.headers.get('content-type') || '');
-  let responseText = '';
-  let bodyJson: unknown = undefined;
-  let bodyBinaryBase64: string | undefined;
-  let bodyBinaryExtension: string | undefined;
-  if (responseContentType.toLowerCase().startsWith('image/')) {
-    const arrayBuffer = await readResponseArrayBufferWithLimit(response, maxUpstreamBinaryResponseBytes, 'upstream binary image response');
-    const buffer = Buffer.from(arrayBuffer);
-    assertBufferWithinLimit(buffer, 'upstream binary image response', maxUpstreamBinaryResponseBytes);
-    bodyBinaryBase64 = buffer.toString('base64');
-    bodyBinaryExtension = detectImageExtensionFromBuffer(buffer);
-  } else {
-    const rawResponseText = await readResponseTextWithLimit(response, maxUpstreamJsonResponseBytes, 'upstream JSON response');
-    try {
-      bodyJson = JSON.parse(rawResponseText);
-      if (!bodyJson || typeof bodyJson !== 'object') {
+  }, input.timeoutMs, input.downstreamAbortSignal);
+  try {
+    const response = upstreamFetch.response;
+    const responseContentType = String(response.headers.get('content-type') || '');
+    let responseText = '';
+    let bodyJson: unknown = undefined;
+    let bodyBinaryBase64: string | undefined;
+    let bodyBinaryExtension: string | undefined;
+    let bodyBinaryFileName: string | undefined;
+    if (responseContentType.toLowerCase().startsWith('image/')) {
+      if (input.streamBinaryResponseToUrl && response.ok) {
+        const stored = await streamResponseToGeneratedImageFile(
+          response,
+          maxUpstreamBinaryResponseBytes,
+          'upstream binary image response',
+        );
+        bodyBinaryFileName = stored.fileName;
+        bodyBinaryExtension = stored.extension;
+      } else {
+        const buffer = await readResponseBufferWithLimit(response, maxUpstreamBinaryResponseBytes, 'upstream binary image response');
+        assertBufferWithinLimit(buffer, 'upstream binary image response', maxUpstreamBinaryResponseBytes);
+        bodyBinaryBase64 = buffer.toString('base64');
+        bodyBinaryExtension = detectImageExtensionFromBuffer(buffer);
+      }
+    } else {
+      const rawResponseText = await readResponseTextWithLimit(response, maxUpstreamJsonResponseBytes, 'upstream JSON response');
+      try {
+        bodyJson = JSON.parse(rawResponseText);
+        if (!bodyJson || typeof bodyJson !== 'object') {
+          responseText = rawResponseText;
+        }
+      } catch {
         responseText = rawResponseText;
       }
-    } catch {
-      responseText = rawResponseText;
     }
+    return {
+      ok: response.ok,
+      statusCode: response.status,
+      contentType: responseContentType,
+      bodyText: responseText,
+      bodyBinaryBase64,
+      bodyBinaryExtension,
+      bodyBinaryFileName,
+      bodyJson,
+    };
+  } catch (error) {
+    if (input.downstreamAbortSignal?.aborted) {
+      throwIfDownstreamCancelled(input.downstreamAbortSignal);
+    }
+    throw error;
+  } finally {
+    upstreamFetch.dispose();
   }
-
-  return {
-    ok: response.ok,
-    statusCode: response.status,
-    contentType: responseContentType,
-    bodyText: responseText,
-    bodyBinaryBase64,
-    bodyBinaryExtension,
-    bodyJson,
-  };
 }
 
 function responseContainsUsableImageOutput(input: {
@@ -5175,9 +5490,10 @@ function responseContainsUsableImageOutput(input: {
   bodyJson?: unknown;
   bodyText?: string;
   bodyBinaryBase64?: string;
+  bodyBinaryFileName?: string;
 }) {
   const normalizedContentType = String(input.contentType || '').toLowerCase();
-  if (normalizedContentType.startsWith('image/') && input.bodyBinaryBase64) {
+  if (normalizedContentType.startsWith('image/') && (input.bodyBinaryBase64 || input.bodyBinaryFileName)) {
     return true;
   }
 
@@ -5731,6 +6047,8 @@ async function buildSmartExecutionPreview(input: {
   payload: z.infer<typeof openAIImagesSchema>;
   operation: 'generations' | 'edits';
   accessContext: RequestAccessContext;
+  asyncTaskAssetDirectory?: string;
+  asyncTaskImageAssets?: AsyncTaskImageAsset[];
 }): Promise<RoutedImageExecutionPreview> {
   const requestedEditProtocol = inferRequestedEditProtocol({
     request: input.request,
@@ -5779,6 +6097,8 @@ async function buildSmartExecutionPreview(input: {
       payload,
       provider: resolved.provider,
       operation: input.operation,
+      asyncTaskAssetDirectory: input.asyncTaskAssetDirectory,
+      asyncTaskImageAssets: input.asyncTaskImageAssets,
     });
     return {
       mode,
@@ -5853,6 +6173,8 @@ async function buildSmartExecutionPreview(input: {
           payload,
           provider: candidate.provider,
           operation: input.operation,
+          asyncTaskAssetDirectory: input.asyncTaskAssetDirectory,
+          asyncTaskImageAssets: input.asyncTaskImageAssets,
         });
       },
     });
@@ -6411,16 +6733,19 @@ async function buildImageTaskResponsePayload(input: {
   responseContentType?: string;
   bodyBinaryBase64?: string;
   bodyBinaryExtension?: string;
+  bodyBinaryFileName?: string;
   responseFormatOverride?: DownstreamImageResponseFormat;
   normalizedBody?: unknown;
 }): Promise<Record<string, unknown>> {
   const outputFormat = String(input.payload.extra_body?.output_format || input.payload.output_format || 'png');
   const requestedResponseFormat = input.responseFormatOverride || resolveDownstreamImageResponseFormat(input.payload);
   let responseBody: unknown = input.normalizedBody !== undefined ? input.normalizedBody : input.bodyJson ?? (
-    input.bodyBinaryBase64
+    input.bodyBinaryBase64 || input.bodyBinaryFileName
       ? {
           data: [{
-            b64_json: input.bodyBinaryBase64,
+            ...(input.bodyBinaryFileName
+              ? { url: buildGeneratedImageUrl(input.request, input.bodyBinaryFileName) }
+              : { b64_json: input.bodyBinaryBase64 }),
             __extension_hint: input.bodyBinaryExtension || detectImageExtension({
               outputFormat,
             }),
@@ -6453,6 +6778,7 @@ async function buildImageTaskResponsePayload(input: {
           responseContentType: input.responseContentType,
           bodyBinaryBase64: input.bodyBinaryBase64,
           bodyBinaryExtension: input.bodyBinaryExtension,
+          bodyBinaryFileName: input.bodyBinaryFileName,
         });
     if (normalizedBody) {
       responseBody = normalizedBody;
@@ -6915,6 +7241,7 @@ type PersistImageGatewayAttemptInput = {
   responseContentType?: string;
   responseBodyBinaryBase64?: string;
   responseBodyBinaryExtension?: string;
+  responseBodyBinaryFileName?: string;
   responseFormatOverride?: DownstreamImageResponseFormat;
   allowDirectPublicImageUrl?: boolean;
   errorPayload?: Record<string, unknown> | null;
@@ -6957,6 +7284,7 @@ async function buildImageGatewayPersistenceOutboxPayload(input: PersistImageGate
         responseContentType: input.responseContentType,
         bodyBinaryBase64: input.responseBodyBinaryBase64,
         bodyBinaryExtension: input.responseBodyBinaryExtension,
+        bodyBinaryFileName: input.responseBodyBinaryFileName,
         responseFormatOverride: input.responseFormatOverride,
         allowDirectPublicImageUrl: input.allowDirectPublicImageUrl,
       });
@@ -7190,6 +7518,7 @@ async function createImageGatewayTask(input: {
       enqueuedAt: now,
       attemptCount: 0,
       assetDirectory: persistedAssets.assetDirectory || undefined,
+      imageAssets: persistedAssets.imageAssets,
     });
     // Keep the admission reservation until this task is visible to every PM2 worker.
     await setImageTaskState(taskId, record, imageTaskTtlSeconds);
@@ -7234,8 +7563,8 @@ async function runImageGatewayTask(
   payload: z.infer<typeof openAIImagesSchema>,
   operation: 'generations' | 'edits',
   accessContext: RequestAccessContext,
-  concurrencyKey: string | null,
-  globalConcurrencyKey: string | null,
+  concurrencyKey: RuntimeConcurrencyLease | null,
+  globalConcurrencyKey: RuntimeConcurrencyLease | null,
   taskClaimKey: string | null,
 ) {
   const taskId = task.task_id;
@@ -7251,8 +7580,23 @@ async function runImageGatewayTask(
   await setImageTaskState(taskId, task, imageTaskTtlSeconds);
 
   try {
-    const executionPayload = await materializeAsyncTaskImageAssets(internal?.assetDirectory, payload);
-    const result = await executeUpstreamImageRequest({ request, payload: executionPayload, operation, accessContext });
+    const asyncMultipartSources = asyncTaskImageSourcesForPayload({
+      assetDirectory: internal?.assetDirectory,
+      imageAssets: internal?.imageAssets,
+      payload,
+    });
+    if (payloadHasAsyncTaskImageAssets(payload) && !asyncMultipartSources?.length) {
+      throw new Error('Async task reference image assets are unavailable.');
+    }
+    const result = await executeUpstreamImageRequest({
+      request,
+      payload,
+      operation,
+      accessContext,
+      asyncTaskAssetDirectory: asyncMultipartSources?.length ? internal?.assetDirectory : undefined,
+      asyncTaskImageAssets: asyncMultipartSources?.length ? internal?.imageAssets : undefined,
+      streamBinaryResponseToUrl: true,
+    });
     if (!result) {
       task.status = 'failed';
       task.error = {
@@ -7317,6 +7661,7 @@ async function runImageGatewayTask(
       responseContentType: result.response.contentType,
       bodyBinaryBase64: result.response.bodyBinaryBase64,
       bodyBinaryExtension: result.response.bodyBinaryExtension,
+      bodyBinaryFileName: result.response.bodyBinaryFileName,
       responseFormatOverride: 'url',
     });
     task.result = result.response.ok
@@ -7373,6 +7718,7 @@ async function runImageGatewayTask(
       responseContentType: result.response.contentType,
       responseBodyBinaryBase64: result.response.bodyBinaryBase64,
       responseBodyBinaryExtension: result.response.bodyBinaryExtension,
+      responseBodyBinaryFileName: result.response.bodyBinaryFileName,
       responseFormatOverride: 'url',
       errorPayload: task.error && typeof task.error === 'object' ? task.error as Record<string, unknown> : null,
       responsePayload: taskResponsePayload,
@@ -7421,6 +7767,7 @@ async function runImageGatewayTask(
         bodyText: result.response.bodyText,
         bodyBinaryBase64: result.response.bodyBinaryBase64,
         bodyBinaryExtension: result.response.bodyBinaryExtension,
+        bodyBinaryFileName: result.response.bodyBinaryFileName,
       },
       errorPayload: task.error && typeof task.error === 'object'
         ? { ...task.error as Record<string, unknown>, routing: result.routing }
@@ -7654,8 +8001,8 @@ async function replyWithProxyResult(
   payload: z.infer<typeof openAIImagesSchema>,
   operation: 'generations' | 'edits',
   result: Awaited<ReturnType<typeof executeUpstreamImageRequest>>,
-  concurrencyKey: string | null,
-  globalConcurrencyKey: string | null,
+  concurrencyKey: RuntimeConcurrencyLease | null,
+  globalConcurrencyKey: RuntimeConcurrencyLease | null,
   startedAt: number,
 ) {
   if (!result) {
@@ -7704,6 +8051,10 @@ async function replyWithProxyResult(
             ? submittedPayload.extra_body.background
             : undefined,
           allowDirectPublicImageUrl: providerAllowsDirectPublicImageUrl(result.resolved.provider),
+          responseContentType: result.response.contentType,
+          bodyBinaryBase64: result.response.bodyBinaryBase64,
+          bodyBinaryExtension: result.response.bodyBinaryExtension,
+          bodyBinaryFileName: result.response.bodyBinaryFileName,
         })
       : null;
   const upstreamResponseBodyJson = normalizedBody || result.response.bodyJson;
@@ -7777,6 +8128,7 @@ async function replyWithProxyResult(
       bodyText: result.response.bodyText,
       bodyBinaryBase64: result.response.bodyBinaryBase64,
       bodyBinaryExtension: result.response.bodyBinaryExtension,
+      bodyBinaryFileName: result.response.bodyBinaryFileName,
     },
     errorPayload: result.response.ok
       ? null
@@ -7807,6 +8159,7 @@ async function replyWithProxyResult(
     responseContentType: result.response.contentType,
     bodyBinaryBase64: result.response.bodyBinaryBase64,
     bodyBinaryExtension: result.response.bodyBinaryExtension,
+    bodyBinaryFileName: result.response.bodyBinaryFileName,
     normalizedBody: normalizedBody ?? undefined,
   });
 
@@ -7834,6 +8187,7 @@ async function replyWithProxyResult(
       responseContentType: result.response.contentType,
       responseBodyBinaryBase64: result.response.bodyBinaryBase64,
       responseBodyBinaryExtension: result.response.bodyBinaryExtension,
+      responseBodyBinaryFileName: result.response.bodyBinaryFileName,
       errorPayload: null,
       responsePayload,
     });
@@ -7869,6 +8223,7 @@ async function replyWithProxyResult(
     responseContentType: result.response.contentType,
     responseBodyBinaryBase64: result.response.bodyBinaryBase64,
     responseBodyBinaryExtension: result.response.bodyBinaryExtension,
+    responseBodyBinaryFileName: result.response.bodyBinaryFileName,
     errorPayload: result.response.ok
       ? null
       : (downstreamError ? { ...downstreamError, upstream_response: result.response.bodyJson || result.response.bodyText } : null),
@@ -7956,13 +8311,16 @@ app.post('/v1beta/models/:model(^[^:]+):generateContent', async (request, reply)
     reply.code(429);
     return buildBananaNativeError(429, 'The image API has reached its global max concurrent request limit.', 'RESOURCE_EXHAUSTED');
   }
+  const downstreamCancellation = createDownstreamCancellation({ request: request.raw, response: reply.raw });
   try {
     const result = await executeUpstreamImageRequest({
       request,
       payload,
       operation: payloadHasReferenceImages(payload) ? 'edits' : 'generations',
       accessContext,
+      downstreamAbortSignal: downstreamCancellation.signal,
     });
+    downstreamCancellation.dispose();
     const taskId = createRuntimeTaskId('banana');
     const statusCode = result?.response.statusCode || 503;
     const responseBody = result?.response.bodyJson;
@@ -8059,7 +8417,12 @@ app.post('/v1beta/models/:model(^[^:]+):generateContent', async (request, reply)
     reply.code(statusCode);
     return ok ? responseBody : nativeError;
   } catch (error) {
+    downstreamCancellation.dispose();
     await releaseImageConcurrency(concurrency.key, globalConcurrency.key);
+    if (isDownstreamClientDisconnectedError(error)) {
+      reply.hijack();
+      return;
+    }
     throw error;
   }
 });
@@ -8279,8 +8642,16 @@ app.post('/v1/images/generations', { bodyLimit: imageRouteBodyLimitBytes }, asyn
     });
   }
 
+  const downstreamCancellation = createDownstreamCancellation({ request: request.raw, response: reply.raw });
   try {
-    const result = await executeUpstreamImageRequest({ request, payload, operation: 'generations', accessContext });
+    const result = await executeUpstreamImageRequest({
+      request,
+      payload,
+      operation: 'generations',
+      accessContext,
+      downstreamAbortSignal: downstreamCancellation.signal,
+    });
+    downstreamCancellation.dispose();
     return await replyWithProxyResult(
       request,
       reply,
@@ -8293,7 +8664,12 @@ app.post('/v1/images/generations', { bodyLimit: imageRouteBodyLimitBytes }, asyn
       requestStartedAt,
     );
   } catch (error) {
+    downstreamCancellation.dispose();
     await releaseImageConcurrency(concurrency.key, globalConcurrency.key);
+    if (isDownstreamClientDisconnectedError(error)) {
+      reply.hijack();
+      return;
+    }
     throw error;
   }
 });
@@ -8518,8 +8894,16 @@ app.post('/v1/images/edits', { bodyLimit: imageRouteBodyLimitBytes }, async (req
     });
   }
 
+  const downstreamCancellation = createDownstreamCancellation({ request: request.raw, response: reply.raw });
   try {
-    const result = await executeUpstreamImageRequest({ request, payload, operation: 'edits', accessContext });
+    const result = await executeUpstreamImageRequest({
+      request,
+      payload,
+      operation: 'edits',
+      accessContext,
+      downstreamAbortSignal: downstreamCancellation.signal,
+    });
+    downstreamCancellation.dispose();
     return await replyWithProxyResult(
       request,
       reply,
@@ -8532,7 +8916,12 @@ app.post('/v1/images/edits', { bodyLimit: imageRouteBodyLimitBytes }, async (req
       requestStartedAt,
     );
   } catch (error) {
+    downstreamCancellation.dispose();
     await releaseImageConcurrency(concurrency.key, globalConcurrency.key);
+    if (isDownstreamClientDisconnectedError(error)) {
+      reply.hijack();
+      return;
+    }
     throw error;
   }
 });
@@ -8978,15 +9367,23 @@ app.post('/v1/chat/completions', async (request, reply) => {
     error: 'no_chat_provider_available',
     message: 'No enabled Chat Completions provider is available.',
   };
+  const downstreamCancellation = createDownstreamCancellation({ request: request.raw, response: reply.raw });
+  try {
   for (const attempt of attempts) {
     const attemptStartedAt = Date.now();
     try {
-      const upstream = await fetchWithTimeout(attempt.url, {
+      const upstreamFetch = await fetchWithTimeout(attempt.url, {
         method: 'POST',
         headers: attempt.headers,
         body: JSON.stringify(attempt.body),
-      }, attempt.timeoutMs);
-      const text = await upstream.text();
+      }, attempt.timeoutMs, downstreamCancellation.signal);
+      const upstream = upstreamFetch.response;
+      let text = '';
+      try {
+        text = await upstream.text();
+      } finally {
+        upstreamFetch.dispose();
+      }
       const json = tryParseJson(text);
       if (upstream.ok) {
         void providerRegistry.reportAttempt({
@@ -9047,6 +9444,10 @@ app.post('/v1/chat/completions', async (request, reply) => {
         break;
       }
     } catch (error) {
+      if (isDownstreamClientDisconnectedError(error)) {
+        reply.hijack();
+        return;
+      }
       lastStatus = 599;
       const message = error instanceof Error ? error.message : 'Chat upstream fetch failed.';
       const failure = classifyUpstreamFailure({ fetchError: error });
@@ -9077,6 +9478,9 @@ app.post('/v1/chat/completions', async (request, reply) => {
   }
   reply.code(lastStatus);
   return lastPayload;
+  } finally {
+    downstreamCancellation.dispose();
+  }
 });
 
 app.get('/v1/canvas/session', async (request, reply) => {
@@ -9978,7 +10382,7 @@ startOperationalRollupScheduler({
   ),
   lookbackDaysProvider: () => Math.max(
     1,
-    Math.min(90, Number(adminControlPlaneStore.get().analytics.operationalRollupLookbackDays || operationalRollupLookbackDays)),
+    Math.min(3, Number(adminControlPlaneStore.get().analytics.operationalRollupLookbackDays || operationalRollupLookbackDays)),
   ),
   bucketMs: operationalRollupBucketMs,
   lockMs: operationalRollupLockMs,

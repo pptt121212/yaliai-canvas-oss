@@ -48,7 +48,9 @@ const minRollupBucketMs = 60 * 60 * 1000;
 const maxRollupBucketMs = 31 * 24 * 60 * 60 * 1000;
 const defaultRollupBucketMs = 24 * 60 * 60 * 1000;
 const defaultRollupIntervalMs = 6 * 60 * 60 * 1000;
-const defaultRollupLookbackDays = 14;
+// Scheduled jobs repair only the most recent closed buckets. Historical rebuilds use the
+// explicit offline command; replaying weeks of raw million-row detail every few hours is not viable.
+const defaultRollupLookbackDays = 2;
 const defaultRollupLockMs = 30 * 60 * 1000;
 const channelPerformanceRollupJobKey = 'channel_performance_daily_v1';
 
@@ -333,7 +335,7 @@ function clampRollupLookbackDays(value: number | undefined) {
   if (!Number.isFinite(normalized) || normalized <= 0) {
     return defaultRollupLookbackDays;
   }
-  return Math.max(1, Math.min(90, normalized));
+  return Math.max(1, Math.min(3, normalized));
 }
 
 function clampRollupLockMs(value: number | undefined) {

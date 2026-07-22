@@ -9,6 +9,8 @@
     "check": "tsc -b tsconfig.json",
     "start": "node dist/src/server.js",
     "bootstrap:postgres": "node dist/src/scripts/bootstrapPostgres.js",
+    "reset:operational-partitions": "node dist/src/scripts/resetOperationalPartitions.js",
+    "verify:operational-partitions": "node dist/src/scripts/verifyOperationalPartitioning.js",
     "migrate:money-precision": "node dist/src/scripts/migrateMoneyPrecision.js",
     "rollup:operational": "node dist/src/scripts/buildOperationalRollups.js"
   },
