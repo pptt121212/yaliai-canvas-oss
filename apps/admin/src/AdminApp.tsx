@@ -100,10 +100,16 @@ type ViewKey =
 
 type TenantFinanceEntryScope = 'account_adjustment' | 'tenant_request_charge';
 type TenantFinanceReports = Record<TenantFinanceEntryScope, TenantFinanceLedgerReport | null>;
+type BillingLedgerScope = 'image' | 'chat';
+type BillingLedgerReports = Record<BillingLedgerScope, BillingLedgerReport | null>;
 
 const emptyTenantFinanceReports: TenantFinanceReports = {
   account_adjustment: null,
   tenant_request_charge: null,
+};
+const emptyBillingLedgerReports: BillingLedgerReports = {
+  image: null,
+  chat: null,
 };
 
 function currentLocalDayRange() {
@@ -207,7 +213,7 @@ export function AdminApp() {
   const [overview, setOverview] = useState<OverviewPayload | null>(null);
   const [catalog, setCatalog] = useState<AdminConsoleCatalog | null>(null);
   const [auditLogReport, setAuditLogReport] = useState<AuditLogReport | null>(null);
-  const [billingLedgerReport, setBillingLedgerReport] = useState<BillingLedgerReport | null>(null);
+  const [billingLedgerReports, setBillingLedgerReports] = useState<BillingLedgerReports>(emptyBillingLedgerReports);
   const [operationalRollupReport, setOperationalRollupReport] = useState<OperationalRollupReport | null>(null);
   const [requestTraceReport, setRequestTraceReport] = useState<RequestTraceReport | null>(null);
   const [routingDiagnosticsReport, setRoutingDiagnosticsReport] = useState<RoutingDiagnosticsReport | null>(null);
@@ -257,11 +263,12 @@ export function AdminApp() {
         setOverview(overviewPayload);
       } else if (view === 'billing-ledger') {
         const today = currentLocalDayRange();
-        const [report, canvasReport] = await Promise.all([
+        const [imageReport, chatReport, canvasReport] = await Promise.all([
           fetchBillingLedgerReport({ limit: 20, scope: 'image', ...today }),
+          fetchBillingLedgerReport({ limit: 20, scope: 'chat', ...today }),
           fetchCanvasUsersReport(),
         ]);
-        setBillingLedgerReport(report);
+        setBillingLedgerReports({ image: imageReport, chat: chatReport });
         setCanvasUsersReport(canvasReport);
         await Promise.all([catalogPromise, controlPlanePromise]);
       } else if (view === 'operational-reports') {
@@ -336,7 +343,7 @@ export function AdminApp() {
       setOverview(null);
       setCatalog(null);
       setAuditLogReport(null);
-      setBillingLedgerReport(null);
+      setBillingLedgerReports(emptyBillingLedgerReports);
       setOperationalRollupReport(null);
       setRequestTraceReport(null);
       setRoutingDiagnosticsReport(null);
@@ -472,12 +479,17 @@ export function AdminApp() {
     if (activeView === 'billing-ledger') {
       return (
         <BillingLedgerPage
-          report={billingLedgerReport}
+          reports={billingLedgerReports}
           catalog={catalog}
           canvasUsersReport={canvasUsersReport}
           loading={pageLoading}
           onQuery={async (query) => {
-            setBillingLedgerReport(await fetchBillingLedgerReport(query));
+            const scope = query.scope;
+            if (!scope) {
+              throw new Error('billing_ledger_scope_required');
+            }
+            const report = await fetchBillingLedgerReport(query);
+            setBillingLedgerReports((current) => ({ ...current, [scope]: report }));
           }}
         />
       );
@@ -533,7 +545,7 @@ export function AdminApp() {
   }, [
     activeView,
     auditLogReport,
-    billingLedgerReport,
+    billingLedgerReports,
     catalog,
     overview,
     operationalRollupReport,

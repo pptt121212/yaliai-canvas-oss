@@ -17,7 +17,7 @@ import type { StatusTone } from '../../shared/ui';
 const { Text } = Typography;
 
 type BillingLedgerPageProps = {
-  report: BillingLedgerReport | null;
+  reports: Record<'image' | 'chat', BillingLedgerReport | null>;
   catalog: AdminConsoleCatalog | null;
   canvasUsersReport: CanvasUserAdminReport | null;
   loading: boolean;
@@ -70,7 +70,7 @@ function operationLabel(value: string) {
   return '文生图';
 }
 
-export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading, onQuery }: BillingLedgerPageProps) {
+export function BillingLedgerPage({ reports, catalog, canvasUsersReport, loading, onQuery }: BillingLedgerPageProps) {
   const [activeTab, setActiveTab] = useState<'image' | 'chat'>('image');
   const [queryLoading, setQueryLoading] = useState(false);
   const [tenantId, setTenantId] = useState<string | undefined>();
@@ -82,7 +82,10 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
     createdAfter: new Date(`${todayDateInput()}T00:00:00`).getTime(),
     createdBefore: new Date(`${todayDateInput()}T00:00:00`).getTime() + 24 * 60 * 60 * 1000,
   }));
-  const [pageCursors, setPageCursors] = useState<Array<{ createdAt: number; id: string } | undefined>>([undefined]);
+  const [pageCursorsByScope, setPageCursorsByScope] = useState<Record<'image' | 'chat', Array<{ createdAt: number; id: string } | undefined>>>({
+    image: [undefined],
+    chat: [undefined],
+  });
   const accountOptions = useMemo(() => {
     const usersByTenant = new Map<string, CanvasUserAdminReport['rows'][number]>();
     for (const user of canvasUsersReport?.rows || []) {
@@ -94,10 +97,10 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
       return { value: tenant.id, label: label || tenant.id, searchText: `${label} ${tenant.id}`.toLowerCase() };
     });
   }, [canvasUsersReport, catalog]);
-  const runQuery = async (query: BillingLedgerQuery) => {
+  const runQueries = async (queries: BillingLedgerQuery[]) => {
     setQueryLoading(true);
     try {
-      await onQuery(query);
+      await Promise.all(queries.map((query) => onQuery(query)));
     } finally {
       setQueryLoading(false);
     }
@@ -114,8 +117,11 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
     } satisfies BillingLedgerQuery;
     setActiveTab(scope);
     setActiveQuery(nextQuery);
-    setPageCursors([undefined]);
-    await runQuery(nextQuery);
+    setPageCursorsByScope({ image: [undefined], chat: [undefined] });
+    await runQueries([
+      { ...nextQuery, scope: 'image' },
+      { ...nextQuery, scope: 'chat' },
+    ]);
   };
   const resetQuery = async () => {
     setTenantId(undefined);
@@ -129,22 +135,28 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
       createdBefore: new Date(`${today}T00:00:00`).getTime() + 24 * 60 * 60 * 1000,
     } satisfies BillingLedgerQuery;
     setActiveQuery(nextQuery);
-    setPageCursors([undefined]);
-    await runQuery(nextQuery);
+    setPageCursorsByScope({ image: [undefined], chat: [undefined] });
+    await runQueries([
+      { ...nextQuery, scope: 'image' },
+      { ...nextQuery, scope: 'chat' },
+    ]);
   };
   const loadPage = async (cursor: { createdAt: number; id: string } | undefined, cursors: Array<{ createdAt: number; id: string } | undefined>) => {
-    setPageCursors(cursors);
-    await runQuery({
+    setPageCursorsByScope((current) => ({ ...current, [activeTab]: cursors }));
+    await runQueries([{
       ...activeQuery,
+      scope: activeTab,
       cursorCreatedAt: cursor?.createdAt,
       cursorId: cursor?.id,
-    });
+    }]);
   };
 
+  const report = reports[activeTab];
   if (!report) {
     return null;
   }
 
+  const pageCursors = pageCursorsByScope[activeTab];
   const canLoadPrevious = pageCursors.length > 1;
   const canLoadNext = report.page.hasMore && Boolean(report.page.nextCursor);
   const isLoading = loading || queryLoading;
@@ -285,10 +297,10 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
       <Card className="diagnostic-card">
         <Tabs
           activeKey={activeTab}
-          onChange={(value) => void queryLedger(value as 'image' | 'chat')}
+          onChange={(value) => setActiveTab(value as 'image' | 'chat')}
           items={[
-            { key: 'image', label: activeTab === 'image' ? `图像生成 (${report.page.totalMatching})` : '图像生成', children: imageTable },
-            { key: 'chat', label: activeTab === 'chat' ? `聊天 (${report.page.totalMatching})` : '聊天', children: chatTable },
+            { key: 'image', label: `图像生成 (${reports.image?.page.totalMatching || 0})`, children: imageTable },
+            { key: 'chat', label: `聊天 (${reports.chat?.page.totalMatching || 0})`, children: chatTable },
           ]}
         />
         <Space wrap style={{ marginTop: 16 }}>
