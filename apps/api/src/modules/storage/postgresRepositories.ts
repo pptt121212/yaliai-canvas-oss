@@ -703,6 +703,8 @@ async function ensureOperationalTables(pool: Pool, schema: string) {
     await pool.query(`create index if not exists ${schema}_request_traces_scope_channel_created_idx on ${schema}.request_traces (scope, channel_id, created_at desc, upstream_id)`);
     await pool.query(`create index if not exists ${schema}_billing_ledger_created_at_idx on ${schema}.billing_ledger (created_at desc)`);
     await pool.query(`create index if not exists ${schema}_billing_ledger_tenant_status_created_idx on ${schema}.billing_ledger (tenant_id, status, created_at desc)`);
+    await pool.query(`create index if not exists ${schema}_billing_ledger_tenant_created_idx on ${schema}.billing_ledger (tenant_id, created_at desc)`);
+    await pool.query(`create index if not exists ${schema}_billing_ledger_api_key_created_idx on ${schema}.billing_ledger (api_key_id, created_at desc)`);
     await pool.query(`create index if not exists ${schema}_billing_ledger_request_id_idx on ${schema}.billing_ledger (request_id)`);
     await pool.query(`create index if not exists ${schema}_billing_ledger_channel_upstream_created_idx on ${schema}.billing_ledger (channel_id, upstream_id, created_at desc)`);
     await pool.query(`create index if not exists ${schema}_billing_ledger_operation_created_idx on ${schema}.billing_ledger (operation, created_at desc)`);
@@ -714,6 +716,7 @@ async function ensureOperationalTables(pool: Pool, schema: string) {
     await pool.query(`create index if not exists ${schema}_task_master_created_channel_upstream_idx on ${schema}.task_master (created_at desc, channel_id, upstream_id) where coalesce(request_payload ->> '_provider_source', '') <> 'user_supplied'`);
     await pool.query(`create index if not exists ${schema}_task_master_image_created_idx on ${schema}.task_master (created_at desc, status) where coalesce(channel_id, '') in ('image_generation', 'channel_image_generation') and coalesce(request_payload ->> '_provider_source', '') <> 'user_supplied'`);
     await pool.query(`create index if not exists ${schema}_tenant_finance_ledger_created_at_idx on ${schema}.tenant_finance_ledger (created_at desc)`);
+    await pool.query(`create index if not exists ${schema}_tenant_finance_ledger_tenant_created_idx on ${schema}.tenant_finance_ledger (tenant_id, created_at desc)`);
     await pool.query(`create index if not exists ${schema}_tenant_finance_ledger_tenant_currency_created_idx on ${schema}.tenant_finance_ledger (tenant_id, currency, created_at desc)`);
     await pool.query(`drop index if exists ${schema}.${schema}_tenant_finance_ledger_tenant_currency_direction_created_`);
     await pool.query(`create index if not exists ${schema}_finance_ledger_tenant_currency_direction_created_idx on ${schema}.tenant_finance_ledger (tenant_id, currency, direction, created_at desc)`);
@@ -1306,11 +1309,31 @@ export function createPostgresOperationalRepository(
       const operations = Array.from(new Set((input.operations || []).filter((operation) => (
         operation === 'generations' || operation === 'edits' || operation === 'chat_completions'
       ))));
-      const where = operations.length ? 'where operation = any($1::text[])' : '';
-      const params: Array<number | string[]> = operations.length
-        ? [operations, input.limit]
-        : [input.limit];
-      const limitParameter = operations.length ? '$2' : '$1';
+      const conditions: string[] = [];
+      const params: Array<number | string | string[]> = [];
+      if (operations.length) {
+        params.push(operations);
+        conditions.push(`operation = any($${params.length}::text[])`);
+      }
+      if (input.tenantId) {
+        params.push(input.tenantId);
+        conditions.push(`tenant_id = $${params.length}`);
+      }
+      if (input.apiKeyId) {
+        params.push(input.apiKeyId);
+        conditions.push(`api_key_id = $${params.length}`);
+      }
+      if (Number.isFinite(input.createdAfter) && Number(input.createdAfter) > 0) {
+        params.push(Number(input.createdAfter));
+        conditions.push(`created_at >= $${params.length}`);
+      }
+      if (Number.isFinite(input.createdBefore) && Number(input.createdBefore) > 0) {
+        params.push(Number(input.createdBefore));
+        conditions.push(`created_at < $${params.length}`);
+      }
+      params.push(input.limit);
+      const where = conditions.length ? `where ${conditions.join(' and ')}` : '';
+      const limitParameter = `$${params.length}`;
       const result = await pool.query(
         `select * from ${schema}.billing_ledger ${where} order by created_at desc limit ${limitParameter}`,
         params,

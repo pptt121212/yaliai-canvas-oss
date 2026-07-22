@@ -1,6 +1,7 @@
-import { Alert, Card, Descriptions, Table, Tabs, Tag, Typography } from 'antd';
-import { useState } from 'react';
-import type { BillingLedgerReport } from '../../shared/types';
+import { Alert, Button, Card, Descriptions, Input, Select, Space, Table, Tabs, Tag, Typography } from 'antd';
+import { useMemo, useState } from 'react';
+import type { AdminConsoleCatalog, BillingLedgerReport, CanvasUserAdminReport } from '../../shared/types';
+import type { BillingLedgerQuery } from '../../shared/api';
 import {
   CodeBlock,
   CompactId,
@@ -17,6 +18,10 @@ const { Text } = Typography;
 
 type BillingLedgerPageProps = {
   report: BillingLedgerReport | null;
+  catalog: AdminConsoleCatalog | null;
+  canvasUsersReport: CanvasUserAdminReport | null;
+  loading: boolean;
+  onQuery: (query: BillingLedgerQuery) => Promise<void>;
 };
 
 function renderTierTag(value?: string) {
@@ -59,12 +64,37 @@ function operationLabel(value: string) {
   return '文生图';
 }
 
-export function BillingLedgerPage({ report }: BillingLedgerPageProps) {
+export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading, onQuery }: BillingLedgerPageProps) {
   if (!report) {
     return null;
   }
 
   const [activeTab, setActiveTab] = useState<'image' | 'chat'>('image');
+  const [tenantId, setTenantId] = useState<string>();
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const accountOptions = useMemo(() => {
+    const usersByTenant = new Map<string, CanvasUserAdminReport['rows'][number]>();
+    for (const user of canvasUsersReport?.rows || []) {
+      if (!usersByTenant.has(user.tenantId) || user.status === 'active') usersByTenant.set(user.tenantId, user);
+    }
+    return (catalog?.tenants || []).map((tenant) => {
+      const user = usersByTenant.get(tenant.id);
+      const label = [user?.username, user?.email, tenant.name, tenant.code].filter(Boolean).join(' · ');
+      return { value: tenant.id, label: label || tenant.id, searchText: `${label} ${tenant.id}`.toLowerCase() };
+    });
+  }, [canvasUsersReport, catalog]);
+  const queryLedger = async () => {
+    const createdAfter = dateFrom ? new Date(`${dateFrom}T00:00:00`).getTime() : undefined;
+    const createdBefore = dateTo ? new Date(`${dateTo}T00:00:00`).getTime() + 24 * 60 * 60 * 1000 : undefined;
+    await onQuery({ tenantId, createdAfter, createdBefore, limit: 5000 });
+  };
+  const resetQuery = async () => {
+    setTenantId(undefined);
+    setDateFrom('');
+    setDateTo('');
+    await onQuery({ limit: 1000 });
+  };
   const isChat = activeTab === 'chat';
   const rows = isChat ? report.chat.rows : report.image.rows;
   const chargedRows = rows.filter((row) => row.status === 'charged');
@@ -162,6 +192,25 @@ export function BillingLedgerPage({ report }: BillingLedgerPageProps) {
         title="计费流水"
         desc="这里是实际扣费审计口径。余额按租户统一扣人民币，API Key 维度仅用于归因追踪；图像与聊天按各自的实际业务字段分别审计。"
       />
+
+      <Card size="small">
+        <Space wrap>
+          <Select
+            allowClear
+            showSearch
+            value={tenantId}
+            style={{ width: 320 }}
+            placeholder="按账户筛选"
+            options={accountOptions}
+            optionFilterProp="searchText"
+            onChange={setTenantId}
+          />
+          <Input type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} />
+          <Input type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} />
+          <Button type="primary" loading={loading} onClick={() => void queryLedger()}>查询</Button>
+          <Button disabled={loading} onClick={() => void resetQuery()}>重置</Button>
+        </Space>
+      </Card>
 
       <Alert
         type="info"

@@ -1,4 +1,4 @@
-import { Button, Card, Drawer, Empty, Form, Input, InputNumber, Select, Space, Statistic, Table, Typography } from 'antd';
+import { Button, Card, Drawer, Empty, Form, Input, InputNumber, Select, Space, Statistic, Table, Tabs, Typography } from 'antd';
 import { useMemo, useState } from 'react';
 import type { AdminConsoleCatalog, CanvasUserAdminReport, TenantFinanceLedgerReport } from '../../shared/types';
 import { DrawerFooter, PageHeader, StatusDot, formatCredits, formatDateTime } from '../../shared/ui';
@@ -84,6 +84,8 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [searchDraft, setSearchDraft] = useState('');
   const [searchKeyword, setSearchKeyword] = useState('');
+  const [ledgerAccountKeyword, setLedgerAccountKeyword] = useState('');
+  const [ledgerScope, setLedgerScope] = useState<'account_adjustment' | 'tenant_request_charge'>('account_adjustment');
   const [form] = Form.useForm<FinanceFormValues>();
   const selectedTenantId = Form.useWatch('tenantId', form);
 
@@ -147,6 +149,26 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
     }));
   }, [accountByTenantId, report]);
 
+  const visibleLedgerRows = useMemo(() => {
+    const keyword = ledgerAccountKeyword.trim().toLowerCase();
+    if (!keyword) return ledgerRows;
+    return ledgerRows.filter((item) => [
+      item.account.username,
+      item.account.email,
+      item.tenantName,
+      item.tenantId,
+      item.operatorLabel,
+    ].filter(Boolean).join(' ').toLowerCase().includes(keyword));
+  }, [ledgerAccountKeyword, ledgerRows]);
+  const accountLedgerRows = useMemo(
+    () => visibleLedgerRows.filter((item) => item.entryType === 'account_adjustment'),
+    [visibleLedgerRows],
+  );
+  const tenantRequestChargeRows = useMemo(
+    () => visibleLedgerRows.filter((item) => item.entryType === 'tenant_request_charge'),
+    [visibleLedgerRows],
+  );
+
   const searchedTenantOptions = useMemo(() => {
     const keyword = String(searchKeyword || '').trim().toLowerCase();
     if (!keyword) {
@@ -205,6 +227,66 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
 
   const selectedAccount = searchedTenantOptions.find((item) => item.value === selectedTenantId) || null;
 
+  function renderLedgerTable(rows: typeof ledgerRows) {
+    return (
+      <Table
+        rowKey="id"
+        size="small"
+        pagination={{ pageSize: 20, showSizeChanger: false }}
+        dataSource={rows}
+        columns={[
+          {
+            title: '时间',
+            dataIndex: 'createdAt',
+            width: 180,
+            render: (value: number) => <span className="mono">{formatDateTime(value)}</span>,
+          },
+          {
+            title: '用户名',
+            width: 180,
+            render: (_, row) => row.account.username,
+          },
+          {
+            title: '邮箱',
+            width: 240,
+            render: (_, row) => row.account.email,
+          },
+          {
+            title: '业务类型',
+            dataIndex: 'sourceLabel',
+            width: 160,
+            render: (value: string | undefined, row) => (
+              <StatusDot tone={row.direction === 'credit' ? 'success' : 'warning'}>
+                {value || (row.direction === 'credit' ? '充值' : '扣费')}
+              </StatusDot>
+            ),
+          },
+          {
+            title: '金额',
+            dataIndex: 'amountCents',
+            width: 120,
+            align: 'right',
+            render: (value: number) => <span className="tabular">{formatCredits(value)}</span>,
+          },
+          {
+            title: '变动后余额',
+            dataIndex: 'balanceAfterCents',
+            width: 140,
+            align: 'right',
+            render: (value: number) => <span className="tabular">{formatCredits(value)}</span>,
+          },
+          {
+            title: '操作来源',
+            dataIndex: 'operatorLabel',
+            width: 220,
+            render: (value: string | undefined, row) => value || row.operatorId,
+          },
+          { title: '备注', dataIndex: 'note' },
+        ]}
+      />
+    );
+  }
+
   return (
     <div className="page-stack">
       <PageHeader
@@ -232,59 +314,27 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
       </div>
 
       <Card>
-        <Table
-          rowKey="id"
-          size="small"
-          pagination={{ pageSize: 20, showSizeChanger: false }}
-          dataSource={ledgerRows}
-          columns={[
+        <Input.Search
+          allowClear
+          value={ledgerAccountKeyword}
+          placeholder="搜索账户 / 邮箱 / 租户 / API Key"
+          style={{ maxWidth: 420, marginBottom: 16 }}
+          onChange={(event) => setLedgerAccountKeyword(event.target.value)}
+        />
+        <Tabs
+          activeKey={ledgerScope}
+          onChange={(key) => setLedgerScope(key as 'account_adjustment' | 'tenant_request_charge')}
+          items={[
             {
-              title: '时间',
-              dataIndex: 'createdAt',
-              width: 180,
-              render: (value: number) => <span className="mono">{formatDateTime(value)}</span>,
+              key: 'account_adjustment',
+              label: `账户充值 / 人工扣费 (${accountLedgerRows.length})`,
+              children: renderLedgerTable(accountLedgerRows),
             },
             {
-              title: '用户名',
-              width: 180,
-              render: (_, row) => row.account.username,
+              key: 'tenant_request_charge',
+              label: `租户 API 请求扣费 (${tenantRequestChargeRows.length})`,
+              children: renderLedgerTable(tenantRequestChargeRows),
             },
-            {
-              title: '邮箱',
-              width: 240,
-              render: (_, row) => row.account.email,
-            },
-            {
-              title: '业务类型',
-              dataIndex: 'sourceLabel',
-              width: 100,
-              render: (value: string | undefined, row) => (
-                <StatusDot tone={row.direction === 'credit' ? 'success' : 'warning'}>
-                  {value || (row.direction === 'credit' ? '充值' : '扣费')}
-                </StatusDot>
-              ),
-            },
-            {
-              title: '金额',
-              dataIndex: 'amountCents',
-              width: 120,
-              align: 'right',
-              render: (value: number) => <span className="tabular">{formatCredits(value)}</span>,
-            },
-            {
-              title: '变动后余额',
-              dataIndex: 'balanceAfterCents',
-              width: 140,
-              align: 'right',
-              render: (value: number) => <span className="tabular">{formatCredits(value)}</span>,
-            },
-            {
-              title: '操作来源',
-              dataIndex: 'operatorLabel',
-              width: 220,
-              render: (value: string | undefined, row) => value || row.operatorId,
-            },
-            { title: '备注', dataIndex: 'note' },
           ]}
         />
       </Card>

@@ -262,6 +262,7 @@ export function TenantsPage({
   const [editingApiKeyId, setEditingApiKeyId] = useState<string | null>(null);
   const [creatingSecret, setCreatingSecret] = useState(false);
   const [currentRawKey, setCurrentRawKey] = useState('');
+  const [accountKeyword, setAccountKeyword] = useState('');
   const [tenantForm] = Form.useForm<TenantFormValues>();
   const [apiKeyForm] = Form.useForm<ApiKeyFormValues>();
 
@@ -430,6 +431,22 @@ export function TenantsPage({
   const rowAccounts = useMemo(() => {
     return new Map(rows.map((row) => [row.tenant.id, pickPrimaryAccount(row.canvasUsers)]));
   }, [rows]);
+  const filteredRows = useMemo(() => {
+    const keyword = accountKeyword.trim().toLowerCase();
+    if (!keyword) return rows;
+    return rows.filter((row) => {
+      const account = rowAccounts.get(row.tenant.id);
+      const searchText = [
+        account?.username,
+        account?.email,
+        row.tenant.name,
+        row.tenant.code,
+        row.tenant.id,
+        ...row.apiKeys.map((item) => item.name),
+      ].filter(Boolean).join(' ').toLowerCase();
+      return searchText.includes(keyword);
+    });
+  }, [accountKeyword, rows, rowAccounts]);
 
   return (
     <div className="page-stack">
@@ -470,10 +487,18 @@ export function TenantsPage({
             )}
           />
 
+          <Input.Search
+            allowClear
+            value={accountKeyword}
+            placeholder="搜索账户 / 邮箱 / 租户 / API Key"
+            style={{ maxWidth: 420 }}
+            onChange={(event) => setAccountKeyword(event.target.value)}
+          />
+
           <Table
             rowKey={(record) => record.tenant.id}
             size="small"
-            dataSource={rows}
+            dataSource={filteredRows}
             pagination={false}
             scroll={{ x: 1200 }}
             columns={[

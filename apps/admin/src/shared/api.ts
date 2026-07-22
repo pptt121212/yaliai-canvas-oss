@@ -133,8 +133,22 @@ export async function fetchResolutionAuditReport(limit = 1000) {
   });
 }
 
-export async function fetchBillingLedgerReport(limit = 1000) {
-  return requestJson<BillingLedgerReport>(`/v1/admin/reports/billing-ledger?limit=${encodeURIComponent(String(limit))}`, {
+export type BillingLedgerQuery = {
+  limit?: number;
+  tenantId?: string;
+  apiKeyId?: string;
+  createdAfter?: number;
+  createdBefore?: number;
+};
+
+export async function fetchBillingLedgerReport(query: BillingLedgerQuery = {}) {
+  const params = new URLSearchParams();
+  params.set('limit', String(query.limit || 1000));
+  if (query.tenantId) params.set('tenantId', query.tenantId);
+  if (query.apiKeyId) params.set('apiKeyId', query.apiKeyId);
+  if (query.createdAfter) params.set('createdAfter', String(query.createdAfter));
+  if (query.createdBefore) params.set('createdBefore', String(query.createdBefore));
+  return requestJson<BillingLedgerReport>(`/v1/admin/reports/billing-ledger?${params.toString()}`, {
     method: 'GET',
   });
 }

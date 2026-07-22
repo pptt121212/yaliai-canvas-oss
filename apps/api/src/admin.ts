@@ -767,6 +767,12 @@ const resolutionAuditQuerySchema = z.object({
 
 const billingLedgerQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(5000).optional(),
+  tenantId: z.string().trim().min(1).optional(),
+  apiKeyId: z.string().trim().min(1).optional(),
+  createdAfter: z.coerce.number().int().nonnegative().optional(),
+  createdBefore: z.coerce.number().int().positive().optional(),
+}).refine((value) => !value.createdAfter || !value.createdBefore || value.createdBefore > value.createdAfter, {
+  message: 'created_before_must_be_after_created_after',
 });
 
 const tenantFinanceLedgerQuerySchema = z.object({
@@ -1889,18 +1895,20 @@ export async function registerAdminRoutes(app: FastifyInstance) {
   app.get('/v1/admin/reports/billing-ledger', async (request, reply) => {
     requireAdmin(request, reply);
     const query = billingLedgerQuerySchema.parse(request.query);
-    const [catalog, imageRows, chatRows, tasks] = await Promise.all([
+    const [catalog, billingRows, tasks] = await Promise.all([
       adminConsoleCatalogStore.refreshAsync(),
       operationalRepository.listBillingLedger({
         limit: query.limit || 1000,
-        operations: ['generations', 'edits'],
-      }),
-      operationalRepository.listBillingLedger({
-        limit: query.limit || 1000,
-        operations: ['chat_completions'],
+        operations: ['generations', 'edits', 'chat_completions'],
+        tenantId: query.tenantId,
+        apiKeyId: query.apiKeyId,
+        createdAfter: query.createdAfter,
+        createdBefore: query.createdBefore,
       }),
       operationalRepository.listTasks(query.limit || 1000),
     ]);
+    const imageRows = billingRows.filter((row) => row.operation === 'generations' || row.operation === 'edits');
+    const chatRows = billingRows.filter((row) => row.operation === 'chat_completions');
     const tenantNameById = new Map(catalog.tenants.map((item) => [item.id, item.name]));
     const apiKeyNameById = new Map(catalog.apiKeys.map((item) => [item.id, item.name]));
     const upstreamNameById = new Map(catalog.upstreams.map((item) => [item.id, item.name]));
@@ -2236,10 +2244,27 @@ export async function registerAdminRoutes(app: FastifyInstance) {
       return normalized || '未知操作人';
     };
     const formatFinanceSource = (row: typeof rows[number]) => {
-      if (row.detail?.source === 'image_request_charge') {
+      const source = String(row.detail?.source || '');
+      if (source === 'banana_image_request_charge') {
+        return 'Banana 图像消费';
+      }
+      if (source === 'image_request_charge') {
         return '图像消费';
       }
+      if (source === 'chat_completions_request_charge') {
+        return 'Chat Completions 消费';
+      }
+      if (row.direction === 'debit' && String(row.operatorId || '').startsWith('system:')) {
+        return '租户 API 消费';
+      }
       return row.direction === 'credit' ? '充值' : '人工扣费';
+    };
+    const classifyFinanceEntry = (row: typeof rows[number]) => {
+      const source = String(row.detail?.source || '');
+      const isTenantRequestCharge = row.direction === 'debit' && (
+        source.endsWith('_request_charge') || String(row.operatorId || '').startsWith('system:')
+      );
+      return isTenantRequestCharge ? 'tenant_request_charge' as const : 'account_adjustment' as const;
     };
     return {
       generatedAt: Date.now(),
@@ -2253,6 +2278,7 @@ export async function registerAdminRoutes(app: FastifyInstance) {
         tenantName: tenantNameById.get(row.tenantId) || row.tenantId,
         operatorLabel: formatFinanceOperator(row.operatorId),
         sourceLabel: formatFinanceSource(row),
+        entryType: classifyFinanceEntry(row),
         currentBalanceCents: balanceByTenantId.get(row.tenantId)?.balanceCents ?? row.balanceAfterCents,
       })),
     };

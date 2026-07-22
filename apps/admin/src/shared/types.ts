@@ -572,6 +572,7 @@ export type TenantFinanceLedgerRow = {
   operatorId: string;
   operatorLabel?: string;
   sourceLabel?: string;
+  entryType: 'account_adjustment' | 'tenant_request_charge';
   direction: 'credit' | 'debit';
   amountCents: number;
   balanceAfterCents: number;

@@ -586,6 +586,10 @@ export interface AsyncOperationalRepository {
   listBillingLedger(input: {
     limit: number;
     operations?: BillingLedgerOperation[];
+    tenantId?: string;
+    apiKeyId?: string;
+    createdAfter?: number;
+    createdBefore?: number;
   }): Promise<BillingLedgerRecord[]>;
   purgeTenantData(tenantId: string): Promise<{
     traces: number;

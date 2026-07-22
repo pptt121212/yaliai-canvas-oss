@@ -242,8 +242,12 @@ export function AdminApp() {
         const [overviewPayload] = await Promise.all([fetchOverview(), catalogPromise, controlPlanePromise]);
         setOverview(overviewPayload);
       } else if (view === 'billing-ledger') {
-        const report = await fetchBillingLedgerReport();
+        const [report, canvasReport] = await Promise.all([
+          fetchBillingLedgerReport(),
+          fetchCanvasUsersReport(),
+        ]);
         setBillingLedgerReport(report);
+        setCanvasUsersReport(canvasReport);
         await Promise.all([catalogPromise, controlPlanePromise]);
       } else if (view === 'operational-reports') {
         const report = await fetchOperationalRollupReport();
@@ -435,7 +439,22 @@ export function AdminApp() {
     }
 
     if (activeView === 'billing-ledger') {
-      return <BillingLedgerPage report={billingLedgerReport} />;
+      return (
+        <BillingLedgerPage
+          report={billingLedgerReport}
+          catalog={catalog}
+          canvasUsersReport={canvasUsersReport}
+          loading={pageLoading}
+          onQuery={async (query) => {
+            setPageLoading(true);
+            try {
+              setBillingLedgerReport(await fetchBillingLedgerReport(query));
+            } finally {
+              setPageLoading(false);
+            }
+          }}
+        />
+      );
     }
 
     if (activeView === 'operational-reports') {
