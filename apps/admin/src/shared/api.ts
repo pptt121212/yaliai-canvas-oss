@@ -145,7 +145,7 @@ export type BillingLedgerQuery = {
 
 export async function fetchBillingLedgerReport(query: BillingLedgerQuery = {}) {
   const params = new URLSearchParams();
-  params.set('limit', String(query.limit || 1000));
+  params.set('limit', String(query.limit || 200));
   if (query.tenantId) params.set('tenantId', query.tenantId);
   if (query.apiKeyId) params.set('apiKeyId', query.apiKeyId);
   if (query.createdAfter) params.set('createdAfter', String(query.createdAfter));
