@@ -239,6 +239,8 @@ export type LedgerCursor = {
 
 export type LedgerPage<T> = {
   rows: T[];
+  /** Exact number of rows matching the filters, independent of the current cursor page. */
+  totalMatching: number;
   hasMore: boolean;
   nextCursor?: LedgerCursor;
 };
@@ -719,6 +721,7 @@ export interface AsyncOperationalRepository {
   upsertTask(record: TaskMasterRecord): Promise<TaskMasterRecord>;
   getTask(taskId: string): Promise<TaskMasterRecord | null>;
   listTasks(limit: number): Promise<TaskMasterRecord[]>;
+  listTasksForBilling(input: { taskIds: string[]; requestIds: string[] }): Promise<TaskMasterRecord[]>;
   listTasksForRoutingAccuracy(limit: number): Promise<TaskMasterRecord[]>;
   getRoutingAccuracySnapshot(snapshotKey: string): Promise<RoutingAccuracySnapshotRecord | null>;
   upsertRoutingAccuracySnapshot(record: RoutingAccuracySnapshotRecord): Promise<RoutingAccuracySnapshotRecord>;

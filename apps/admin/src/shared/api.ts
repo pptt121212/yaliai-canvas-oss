@@ -146,7 +146,7 @@ export type BillingLedgerQuery = {
 
 export async function fetchBillingLedgerReport(query: BillingLedgerQuery = {}) {
   const params = new URLSearchParams();
-  params.set('limit', String(query.limit || 200));
+  params.set('limit', String(query.limit || 20));
   if (query.scope) params.set('scope', query.scope);
   if (query.tenantId) params.set('tenantId', query.tenantId);
   if (query.apiKeyId) params.set('apiKeyId', query.apiKeyId);
@@ -228,7 +228,7 @@ export type TenantFinanceLedgerQuery = {
 
 export async function fetchTenantFinanceLedgerReport(query: TenantFinanceLedgerQuery = {}) {
   const params = new URLSearchParams();
-  params.set('limit', String(query.limit || 200));
+  params.set('limit', String(query.limit || 20));
   if (query.tenantId) params.set('tenantId', query.tenantId);
   if (query.direction) params.set('direction', query.direction);
   if (query.entryType) params.set('entryType', query.entryType);

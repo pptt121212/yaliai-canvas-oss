@@ -106,6 +106,12 @@ const emptyTenantFinanceReports: TenantFinanceReports = {
   tenant_request_charge: null,
 };
 
+function currentLocalDayRange() {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  return { createdAfter: start, createdBefore: start + 24 * 60 * 60 * 1000 };
+}
+
 const menuItems = [
   { key: 'overview', icon: <ApartmentOutlined />, label: '总览' },
   { key: 'upstreams', icon: <LinkOutlined />, label: '上游接入' },
@@ -250,8 +256,9 @@ export function AdminApp() {
         const [overviewPayload] = await Promise.all([fetchOverview(), catalogPromise, controlPlanePromise]);
         setOverview(overviewPayload);
       } else if (view === 'billing-ledger') {
+        const today = currentLocalDayRange();
         const [report, canvasReport] = await Promise.all([
-          fetchBillingLedgerReport({ limit: 200, scope: 'image' }),
+          fetchBillingLedgerReport({ limit: 20, scope: 'image', ...today }),
           fetchCanvasUsersReport(),
         ]);
         setBillingLedgerReport(report);
@@ -278,9 +285,10 @@ export function AdminApp() {
         setResolutionAuditReport(report);
         await Promise.all([catalogPromise, controlPlanePromise]);
       } else if (view === 'tenant-finance') {
+        const today = currentLocalDayRange();
         const [adjustmentReport, requestChargeReport, canvasReport] = await Promise.all([
-          fetchTenantFinanceLedgerReport({ limit: 200, entryType: 'account_adjustment' }),
-          fetchTenantFinanceLedgerReport({ limit: 200, entryType: 'tenant_request_charge' }),
+          fetchTenantFinanceLedgerReport({ limit: 20, entryType: 'account_adjustment', ...today }),
+          fetchTenantFinanceLedgerReport({ limit: 20, entryType: 'tenant_request_charge', ...today }),
           fetchCanvasUsersReport(),
         ]);
         setTenantFinanceReports({

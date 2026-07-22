@@ -46,6 +46,12 @@ type AccountOption = {
   tenantCode: string;
 };
 
+function todayDateInput() {
+  const now = new Date();
+  const offset = now.getTimezoneOffset() * 60_000;
+  return new Date(now.getTime() - offset).toISOString().slice(0, 10);
+}
+
 function accountSearchScore(option: AccountOption, keyword: string) {
   const normalizedKeyword = String(keyword || '').trim().toLowerCase();
   const searchText = String(option.searchText || '');
@@ -92,9 +98,16 @@ export function TenantFinancePage({ catalog, reports, canvasUsersReport, saving,
   const [ledgerAccountKeyword, setLedgerAccountKeyword] = useState('');
   const [ledgerScope, setLedgerScope] = useState<FinanceEntryScope>('account_adjustment');
   const [ledgerTenantId, setLedgerTenantId] = useState<string | undefined>();
-  const [ledgerDateFrom, setLedgerDateFrom] = useState('');
-  const [ledgerDateTo, setLedgerDateTo] = useState('');
-  const [activeLedgerQuery, setActiveLedgerQuery] = useState<TenantFinanceLedgerQuery>({ limit: 200 });
+  const [ledgerDateFrom, setLedgerDateFrom] = useState(todayDateInput);
+  const [ledgerDateTo, setLedgerDateTo] = useState(todayDateInput);
+  const [activeLedgerQuery, setActiveLedgerQuery] = useState<TenantFinanceLedgerQuery>(() => {
+    const today = todayDateInput();
+    return {
+      limit: 20,
+      createdAfter: new Date(`${today}T00:00:00`).getTime(),
+      createdBefore: new Date(`${today}T00:00:00`).getTime() + 24 * 60 * 60 * 1000,
+    };
+  });
   const [ledgerLoading, setLedgerLoading] = useState(false);
   const [pageCursorsByScope, setPageCursorsByScope] = useState<Record<FinanceEntryScope, Array<{ createdAt: number; id: string } | undefined>>>({
     account_adjustment: [undefined],
@@ -244,7 +257,7 @@ export function TenantFinancePage({ catalog, reports, canvasUsersReport, saving,
     },
   ): TenantFinanceLedgerQuery => ({
     ...filter,
-    limit: filter.tenantId || (filter.createdAfter && filter.createdBefore) ? 5000 : 200,
+    limit: 20,
     entryType,
   });
 
@@ -287,16 +300,20 @@ export function TenantFinancePage({ catalog, reports, canvasUsersReport, saving,
 
   const resetLedgerQuery = async () => {
     setLedgerTenantId(undefined);
-    setLedgerDateFrom('');
-    setLedgerDateTo('');
+    const today = todayDateInput();
+    setLedgerDateFrom(today);
+    setLedgerDateTo(today);
     setLedgerAccountKeyword('');
-    await refreshAllLedgerScopes({});
+    await refreshAllLedgerScopes({
+      createdAfter: new Date(`${today}T00:00:00`).getTime(),
+      createdBefore: new Date(`${today}T00:00:00`).getTime() + 24 * 60 * 60 * 1000,
+    });
   };
 
   const report = reports[ledgerScope];
   const pageCursors = pageCursorsByScope[ledgerScope];
-  const adjustmentCount = reports.account_adjustment?.total || 0;
-  const requestChargeCount = reports.tenant_request_charge?.total || 0;
+  const adjustmentCount = reports.account_adjustment?.page.totalMatching || 0;
+  const requestChargeCount = reports.tenant_request_charge?.page.totalMatching || 0;
 
   const selectedAccount = searchedTenantOptions.find((item) => item.value === selectedTenantId) || null;
 
@@ -305,7 +322,7 @@ export function TenantFinancePage({ catalog, reports, canvasUsersReport, saving,
       <Table
         rowKey="id"
         size="small"
-        pagination={{ pageSize: 20, showSizeChanger: false }}
+        pagination={false}
         dataSource={rows}
         columns={[
           {
@@ -412,7 +429,7 @@ export function TenantFinancePage({ catalog, reports, canvasUsersReport, saving,
         />
         {report ? (
           <Space wrap style={{ marginBottom: 16 }}>
-            <Text type="secondary">当前第 {pageCursors.length} 页，每页 {report.page.limit} 条。</Text>
+            <Text type="secondary">共匹配 {report.page.totalMatching} 条，当前第 {pageCursors.length} 页，每页 {report.page.limit} 条。</Text>
             <Button
               disabled={ledgerLoading || pageCursors.length <= 1}
               onClick={() => void loadLedgerPage(pageCursors[pageCursors.length - 2], pageCursors.slice(0, -1))}

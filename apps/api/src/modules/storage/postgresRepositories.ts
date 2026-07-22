@@ -711,6 +711,7 @@ async function ensureOperationalTables(pool: Pool, schema: string) {
     await pool.query(`create index if not exists ${schema}_billing_ledger_request_id_idx on ${schema}.billing_ledger (request_id)`);
     await pool.query(`create index if not exists ${schema}_billing_ledger_channel_upstream_created_idx on ${schema}.billing_ledger (channel_id, upstream_id, created_at desc)`);
     await pool.query(`create index if not exists ${schema}_billing_ledger_operation_created_idx on ${schema}.billing_ledger (operation, created_at desc)`);
+    await pool.query(`create index if not exists ${schema}_billing_ledger_operation_created_id_idx on ${schema}.billing_ledger (operation, created_at desc, id desc)`);
     await pool.query(`create index if not exists ${schema}_billing_ledger_charged_created_channel_idx on ${schema}.billing_ledger (created_at desc, channel_id, upstream_id) where status = 'charged'`);
     await pool.query(`create index if not exists ${schema}_task_master_created_at_idx on ${schema}.task_master (created_at desc)`);
     await pool.query(`create index if not exists ${schema}_task_master_updated_at_idx on ${schema}.task_master (updated_at)`);
@@ -722,6 +723,7 @@ async function ensureOperationalTables(pool: Pool, schema: string) {
     await pool.query(`create index if not exists ${schema}_tenant_finance_ledger_created_id_idx on ${schema}.tenant_finance_ledger (created_at desc, id desc)`);
     await pool.query(`create index if not exists ${schema}_tenant_finance_ledger_tenant_created_idx on ${schema}.tenant_finance_ledger (tenant_id, created_at desc)`);
     await pool.query(`create index if not exists ${schema}_tenant_finance_ledger_tenant_created_id_idx on ${schema}.tenant_finance_ledger (tenant_id, created_at desc, id desc)`);
+    await pool.query(`create index if not exists ${schema}_tenant_finance_ledger_request_charge_created_id_idx on ${schema}.tenant_finance_ledger (created_at desc, id desc) where direction = 'debit' and (operator_id like 'system:%' or coalesce(detail ->> 'source', '') like '%_request_charge')`);
     await pool.query(`create index if not exists ${schema}_tenant_finance_ledger_tenant_currency_created_idx on ${schema}.tenant_finance_ledger (tenant_id, currency, created_at desc)`);
     await pool.query(`drop index if exists ${schema}.${schema}_tenant_finance_ledger_tenant_currency_direction_created_`);
     await pool.query(`create index if not exists ${schema}_finance_ledger_tenant_currency_direction_created_idx on ${schema}.tenant_finance_ledger (tenant_id, currency, direction, created_at desc)`);
@@ -1390,16 +1392,23 @@ export function createPostgresOperationalRepository(
         params.push(Number(input.createdBefore));
         conditions.push(`created_at < $${params.length}`);
       }
-      if (input.cursor) {
-        params.push(input.cursor.createdAt, input.cursor.id);
-        conditions.push(`(created_at < $${params.length - 1} or (created_at = $${params.length - 1} and id < $${params.length}))`);
-      }
-      const limit = Math.max(1, Math.min(5_000, Number(input.limit || 100)));
-      params.push(limit + 1);
-      const where = conditions.length ? `where ${conditions.join(' and ')}` : '';
-      const result = await pool.query(
-        `select * from ${schema}.billing_ledger ${where} order by created_at desc, id desc limit $${params.length}`,
+      // Count before adding the cursor: the count represents the entire selected scope.
+      const filterWhere = conditions.length ? `where ${conditions.join(' and ')}` : '';
+      const countResult = await pool.query(
+        `select count(*)::bigint as total from ${schema}.billing_ledger ${filterWhere}`,
         params,
+      );
+      const pageParams = [...params];
+      if (input.cursor) {
+        pageParams.push(input.cursor.createdAt, input.cursor.id);
+        conditions.push(`(created_at < $${pageParams.length - 1} or (created_at = $${pageParams.length - 1} and id < $${pageParams.length}))`);
+      }
+      const limit = Math.max(1, Math.min(100, Number(input.limit || 20)));
+      pageParams.push(limit + 1);
+      const pageWhere = conditions.length ? `where ${conditions.join(' and ')}` : '';
+      const result = await pool.query(
+        `select * from ${schema}.billing_ledger ${pageWhere} order by created_at desc, id desc limit $${pageParams.length}`,
+        pageParams,
       );
       const pageRows = result.rows.slice(0, limit).map((row) => ({
         id: row.id,
@@ -1423,6 +1432,7 @@ export function createPostgresOperationalRepository(
       const last = pageRows[pageRows.length - 1];
       return {
         rows: pageRows,
+        totalMatching: Number(countResult.rows[0]?.total || 0),
         hasMore: result.rows.length > limit,
         nextCursor: result.rows.length > limit && last ? { createdAt: last.createdAt, id: last.id } : undefined,
       };
@@ -1656,21 +1666,29 @@ export function createPostgresOperationalRepository(
       } else if (input.entryType === 'account_adjustment') {
         conditions.push(`not (${requestChargePredicate})`);
       }
-      if (input.cursor) {
-        params.push(input.cursor.createdAt, input.cursor.id);
-        conditions.push(`(created_at < $${params.length - 1} or (created_at = $${params.length - 1} and id < $${params.length}))`);
-      }
-      const limit = Math.max(1, Math.min(5_000, Number(input.limit || 100)));
-      params.push(limit + 1);
-      const where = conditions.length ? `where ${conditions.join(' and ')}` : '';
-      const result = await pool.query(
-        `select * from ${schema}.tenant_finance_ledger ${where} order by created_at desc, id desc limit $${params.length}`,
+      // Keep the count and the page on the same filters; the cursor only changes which page is read.
+      const filterWhere = conditions.length ? `where ${conditions.join(' and ')}` : '';
+      const countResult = await pool.query(
+        `select count(*)::bigint as total from ${schema}.tenant_finance_ledger ${filterWhere}`,
         params,
+      );
+      const pageParams = [...params];
+      if (input.cursor) {
+        pageParams.push(input.cursor.createdAt, input.cursor.id);
+        conditions.push(`(created_at < $${pageParams.length - 1} or (created_at = $${pageParams.length - 1} and id < $${pageParams.length}))`);
+      }
+      const limit = Math.max(1, Math.min(100, Number(input.limit || 20)));
+      pageParams.push(limit + 1);
+      const pageWhere = conditions.length ? `where ${conditions.join(' and ')}` : '';
+      const result = await pool.query(
+        `select * from ${schema}.tenant_finance_ledger ${pageWhere} order by created_at desc, id desc limit $${pageParams.length}`,
+        pageParams,
       );
       const pageRows = result.rows.slice(0, limit).map(mapTenantFinanceLedgerRow);
       const last = pageRows[pageRows.length - 1];
       return {
         rows: pageRows,
+        totalMatching: Number(countResult.rows[0]?.total || 0),
         hasMore: result.rows.length > limit,
         nextCursor: result.rows.length > limit && last ? { createdAt: last.createdAt, id: last.id } : undefined,
       };
@@ -2857,6 +2875,38 @@ export function createPostgresOperationalRepository(
         responsePayload: row.response_payload || null,
         errorPayload: row.error_payload || null,
         billedCredits: row.billed_credits ?? undefined,
+      } satisfies TaskMasterRecord));
+    },
+    async listTasksForBilling(input) {
+      await ensureOperationalTables(pool, schema);
+      const taskIds = Array.from(new Set((input.taskIds || []).filter(Boolean)));
+      const requestIds = Array.from(new Set((input.requestIds || []).filter(Boolean)));
+      if (!taskIds.length && !requestIds.length) {
+        return [];
+      }
+      const result = await pool.query(
+        `
+          select task_id, request_id, request_payload
+          from ${schema}.task_master
+          where task_id = any($1::text[]) or request_id = any($2::text[])
+        `,
+        [taskIds, requestIds],
+      );
+      return result.rows.map((row) => ({
+        taskId: row.task_id,
+        requestId: row.request_id,
+        tenantId: '',
+        apiKeyId: '',
+        channelId: '',
+        operation: 'generations',
+        status: 'completed',
+        model: '',
+        promptPreview: '',
+        createdAt: 0,
+        updatedAt: 0,
+        requestPayload: row.request_payload || {},
+        responsePayload: null,
+        errorPayload: null,
       } satisfies TaskMasterRecord));
     },
     async listTasksForRoutingAccuracy(limit: number) {

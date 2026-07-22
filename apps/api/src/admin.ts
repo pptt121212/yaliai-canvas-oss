@@ -766,7 +766,7 @@ const resolutionAuditQuerySchema = z.object({
 });
 
 const billingLedgerQuerySchema = z.object({
-  limit: z.coerce.number().int().positive().max(5000).optional(),
+  limit: z.coerce.number().int().positive().max(100).optional(),
   scope: z.enum(['image', 'chat']).optional(),
   tenantId: z.string().trim().min(1).optional(),
   apiKeyId: z.string().trim().min(1).optional(),
@@ -781,7 +781,7 @@ const billingLedgerQuerySchema = z.object({
 });
 
 const tenantFinanceLedgerQuerySchema = z.object({
-  limit: z.coerce.number().int().positive().max(5000).optional(),
+  limit: z.coerce.number().int().positive().max(100).optional(),
   tenantId: z.string().trim().min(1).optional(),
   direction: z.enum(['credit', 'debit']).optional(),
   entryType: z.enum(['account_adjustment', 'tenant_request_charge']).optional(),
@@ -1915,10 +1915,10 @@ export async function registerAdminRoutes(app: FastifyInstance) {
   app.get('/v1/admin/reports/billing-ledger', async (request, reply) => {
     requireAdmin(request, reply);
     const query = billingLedgerQuerySchema.parse(request.query);
-    const [catalog, billingPage, tasks] = await Promise.all([
+    const [catalog, billingPage] = await Promise.all([
       adminConsoleCatalogStore.refreshAsync(),
       operationalRepository.listBillingLedgerPage({
-        limit: query.limit || 200,
+        limit: query.limit || 20,
         operations: query.scope === 'chat'
           ? ['chat_completions']
           : query.scope === 'image'
@@ -1932,9 +1932,12 @@ export async function registerAdminRoutes(app: FastifyInstance) {
           ? { createdAt: query.cursorCreatedAt, id: query.cursorId }
           : undefined,
       }),
-      operationalRepository.listTasks(query.limit || 200),
     ]);
     const billingRows = billingPage.rows;
+    const tasks = await operationalRepository.listTasksForBilling({
+      taskIds: billingRows.flatMap((row) => row.taskId ? [row.taskId] : []),
+      requestIds: billingRows.map((row) => row.requestId),
+    });
     const imageRows = billingRows.filter((row) => row.operation === 'generations' || row.operation === 'edits');
     const chatRows = billingRows.filter((row) => row.operation === 'chat_completions');
     const tenantNameById = new Map(catalog.tenants.map((item) => [item.id, item.name]));
@@ -2031,17 +2034,18 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     const chat = decorateRows(chatRows, false);
     return {
       generatedAt: Date.now(),
-      total: image.length + chat.length,
+      total: billingPage.totalMatching,
       page: {
-        limit: query.limit || 200,
+        limit: query.limit || 20,
+        totalMatching: billingPage.totalMatching,
         currentCursor: query.cursorCreatedAt && query.cursorId
           ? { createdAt: query.cursorCreatedAt, id: query.cursorId }
           : undefined,
         hasMore: billingPage.hasMore,
         nextCursor: billingPage.nextCursor,
       },
-      image: { total: image.length, rows: image },
-      chat: { total: chat.length, rows: chat },
+      image: { total: query.scope === 'chat' ? 0 : billingPage.totalMatching, rows: image },
+      chat: { total: query.scope === 'image' ? 0 : billingPage.totalMatching, rows: chat },
     };
   });
 
@@ -2275,7 +2279,7 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     const [catalog, ledgerPage, balances] = await Promise.all([
       adminConsoleCatalogStore.refreshAsync(),
       operationalRepository.listTenantFinanceLedgerPage({
-        limit: query.limit || 200,
+        limit: query.limit || 20,
         tenantId: query.tenantId,
         direction: query.direction,
         entryType: query.entryType,
@@ -2325,9 +2329,10 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     };
     return {
       generatedAt: Date.now(),
-      total: rows.length,
+      total: ledgerPage.totalMatching,
       page: {
-        limit: query.limit || 200,
+        limit: query.limit || 20,
+        totalMatching: ledgerPage.totalMatching,
         currentCursor: query.cursorCreatedAt && query.cursorId
           ? { createdAt: query.cursorCreatedAt, id: query.cursorId }
           : undefined,

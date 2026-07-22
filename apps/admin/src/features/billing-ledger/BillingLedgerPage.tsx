@@ -24,28 +24,10 @@ type BillingLedgerPageProps = {
   onQuery: (query: BillingLedgerQuery) => Promise<void>;
 };
 
-const billingFilterStorageKey = 'yali-admin.billing-ledger-filter';
-
-type BillingLedgerFilterState = {
-  tenantId?: string;
-  dateFrom: string;
-  dateTo: string;
-};
-
-function readBillingLedgerFilterState(): BillingLedgerFilterState {
-  if (typeof window === 'undefined') {
-    return { dateFrom: '', dateTo: '' };
-  }
-  try {
-    const value = JSON.parse(window.sessionStorage.getItem(billingFilterStorageKey) || '{}') as Partial<BillingLedgerFilterState>;
-    return {
-      tenantId: typeof value.tenantId === 'string' && value.tenantId ? value.tenantId : undefined,
-      dateFrom: typeof value.dateFrom === 'string' ? value.dateFrom : '',
-      dateTo: typeof value.dateTo === 'string' ? value.dateTo : '',
-    };
-  } catch {
-    return { dateFrom: '', dateTo: '' };
-  }
+function todayDateInput() {
+  const now = new Date();
+  const offset = now.getTimezoneOffset() * 60_000;
+  return new Date(now.getTime() - offset).toISOString().slice(0, 10);
 }
 
 function renderTierTag(value?: string) {
@@ -90,11 +72,15 @@ function operationLabel(value: string) {
 
 export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading, onQuery }: BillingLedgerPageProps) {
   const [activeTab, setActiveTab] = useState<'image' | 'chat'>('image');
-  const [savedFilter] = useState(readBillingLedgerFilterState);
-  const [tenantId, setTenantId] = useState<string | undefined>(savedFilter.tenantId);
-  const [dateFrom, setDateFrom] = useState(savedFilter.dateFrom);
-  const [dateTo, setDateTo] = useState(savedFilter.dateTo);
-  const [activeQuery, setActiveQuery] = useState<BillingLedgerQuery>({ limit: 200, scope: 'image' });
+  const [tenantId, setTenantId] = useState<string | undefined>();
+  const [dateFrom, setDateFrom] = useState(todayDateInput);
+  const [dateTo, setDateTo] = useState(todayDateInput);
+  const [activeQuery, setActiveQuery] = useState<BillingLedgerQuery>(() => ({
+    limit: 20,
+    scope: 'image',
+    createdAfter: new Date(`${todayDateInput()}T00:00:00`).getTime(),
+    createdBefore: new Date(`${todayDateInput()}T00:00:00`).getTime() + 24 * 60 * 60 * 1000,
+  }));
   const [pageCursors, setPageCursors] = useState<Array<{ createdAt: number; id: string } | undefined>>([undefined]);
   const accountOptions = useMemo(() => {
     const usersByTenant = new Map<string, CanvasUserAdminReport['rows'][number]>();
@@ -107,9 +93,6 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
       return { value: tenant.id, label: label || tenant.id, searchText: `${label} ${tenant.id}`.toLowerCase() };
     });
   }, [canvasUsersReport, catalog]);
-  const persistFilter = (filter: BillingLedgerFilterState) => {
-    window.sessionStorage.setItem(billingFilterStorageKey, JSON.stringify(filter));
-  };
   const queryLedger = async (scope = activeTab) => {
     const createdAfter = dateFrom ? new Date(`${dateFrom}T00:00:00`).getTime() : undefined;
     const createdBefore = dateTo ? new Date(`${dateTo}T00:00:00`).getTime() + 24 * 60 * 60 * 1000 : undefined;
@@ -117,24 +100,28 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
       tenantId,
       createdAfter,
       createdBefore,
-      limit: createdAfter && createdBefore ? 5000 : 200,
+      limit: 20,
       scope,
     } satisfies BillingLedgerQuery;
     setActiveTab(scope);
     setActiveQuery(nextQuery);
     setPageCursors([undefined]);
     await onQuery(nextQuery);
-    persistFilter({ tenantId, dateFrom, dateTo });
   };
   const resetQuery = async () => {
     setTenantId(undefined);
-    setDateFrom('');
-    setDateTo('');
-    const nextQuery = { limit: 200, scope: activeTab } satisfies BillingLedgerQuery;
+    const today = todayDateInput();
+    setDateFrom(today);
+    setDateTo(today);
+    const nextQuery = {
+      limit: 20,
+      scope: activeTab,
+      createdAfter: new Date(`${today}T00:00:00`).getTime(),
+      createdBefore: new Date(`${today}T00:00:00`).getTime() + 24 * 60 * 60 * 1000,
+    } satisfies BillingLedgerQuery;
     setActiveQuery(nextQuery);
     setPageCursors([undefined]);
     await onQuery(nextQuery);
-    persistFilter({ dateFrom: '', dateTo: '' });
   };
   const loadPage = async (cursor: { createdAt: number; id: string } | undefined, cursors: Array<{ createdAt: number; id: string } | undefined>) => {
     setPageCursors(cursors);
@@ -163,7 +150,7 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
       size="small"
       tableLayout="fixed"
       scroll={{ x: 1810 }}
-      pagination={{ pageSize: 20, showSizeChanger: false }}
+      pagination={false}
       dataSource={rows}
       expandable={{
         expandedRowRender: (row) => (
@@ -212,7 +199,7 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
       size="small"
       tableLayout="fixed"
       scroll={{ x: 1240 }}
-      pagination={{ pageSize: 20, showSizeChanger: false }}
+      pagination={false}
       dataSource={rows}
       expandable={{
         expandedRowRender: (row) => (
@@ -278,7 +265,7 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
       />
 
       <Space wrap>
-        <Text type="secondary">当前第 {pageCursors.length} 页，每页 {report.page.limit} 条。</Text>
+        <Text type="secondary">共匹配 {report.page.totalMatching} 条，当前第 {pageCursors.length} 页，每页 {report.page.limit} 条。</Text>
         <Button
           disabled={loading || !canLoadPrevious}
           onClick={() => void loadPage(pageCursors[pageCursors.length - 2], pageCursors.slice(0, -1))}
@@ -300,9 +287,9 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
 
       <StatStrip
         items={[
-          { label: '当前条件流水条数', value: rows.length },
-          { label: '已扣费笔数', value: chargedRows.length },
-          { label: '累计实扣', value: formatCredits(totalCharged) },
+          { label: '当前条件流水总数', value: report.page.totalMatching },
+          { label: '当前页已扣费笔数', value: chargedRows.length },
+          { label: '当前页实扣', value: formatCredits(totalCharged) },
         ]}
       />
 
@@ -311,8 +298,8 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
           activeKey={activeTab}
           onChange={(value) => void queryLedger(value as 'image' | 'chat')}
           items={[
-            { key: 'image', label: activeTab === 'image' ? `图像生成 (${report.image.total})` : '图像生成', children: imageTable },
-            { key: 'chat', label: activeTab === 'chat' ? `聊天 (${report.chat.total})` : '聊天', children: chatTable },
+            { key: 'image', label: activeTab === 'image' ? `图像生成 (${report.page.totalMatching})` : '图像生成', children: imageTable },
+            { key: 'chat', label: activeTab === 'chat' ? `聊天 (${report.page.totalMatching})` : '聊天', children: chatTable },
           ]}
         />
       </Card>

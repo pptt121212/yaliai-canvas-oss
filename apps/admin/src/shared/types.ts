@@ -313,6 +313,7 @@ export type BillingLedgerReport = {
   total: number;
   page: {
     limit: number;
+    totalMatching: number;
     currentCursor?: { createdAt: number; id: string };
     hasMore: boolean;
     nextCursor?: { createdAt: number; id: string };
@@ -592,6 +593,7 @@ export type TenantFinanceLedgerReport = {
   total: number;
   page: {
     limit: number;
+    totalMatching: number;
     currentCursor?: { createdAt: number; id: string };
     hasMore: boolean;
     nextCursor?: { createdAt: number; id: string };
