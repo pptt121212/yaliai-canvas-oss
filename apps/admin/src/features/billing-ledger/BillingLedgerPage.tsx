@@ -264,27 +264,6 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
           : '请求尺寸和请求画质以实际提交给上游的参数为准；实际尺寸来自成功响应。常规共享线路按请求尺寸档位和请求画质结算；固定线路一口价按张结算。'}
       />
 
-      <Space wrap>
-        <Text type="secondary">共匹配 {report.page.totalMatching} 条，当前第 {pageCursors.length} 页，每页 {report.page.limit} 条。</Text>
-        <Button
-          disabled={loading || !canLoadPrevious}
-          onClick={() => void loadPage(pageCursors[pageCursors.length - 2], pageCursors.slice(0, -1))}
-        >
-          上一页
-        </Button>
-        <Button
-          disabled={loading || !canLoadNext}
-          onClick={() => {
-            const nextCursor = report.page.nextCursor;
-            if (!nextCursor) return;
-            void loadPage(nextCursor, [...pageCursors, nextCursor]);
-          }}
-        >
-          下一页
-        </Button>
-        {report.page.hasMore ? <Text type="secondary">仍有更早的匹配流水。</Text> : <Text type="secondary">已到达该条件下的最早流水。</Text>}
-      </Space>
-
       <StatStrip
         items={[
           { label: '当前条件流水总数', value: report.page.totalMatching },
@@ -302,6 +281,26 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
             { key: 'chat', label: activeTab === 'chat' ? `聊天 (${report.page.totalMatching})` : '聊天', children: chatTable },
           ]}
         />
+        <Space wrap style={{ marginTop: 16 }}>
+          <Text type="secondary">共匹配 {report.page.totalMatching} 条，当前第 {pageCursors.length} 页，每页 {report.page.limit} 条。</Text>
+          <Button
+            disabled={loading || !canLoadPrevious}
+            onClick={() => void loadPage(pageCursors[pageCursors.length - 2], pageCursors.slice(0, -1))}
+          >
+            上一页
+          </Button>
+          <Button
+            disabled={loading || !canLoadNext}
+            onClick={() => {
+              const nextCursor = report.page.nextCursor;
+              if (!nextCursor) return;
+              void loadPage(nextCursor, [...pageCursors, nextCursor]);
+            }}
+          >
+            下一页
+          </Button>
+          {report.page.hasMore ? <Text type="secondary">仍有更早的匹配流水。</Text> : <Text type="secondary">已到达该条件下的最早流水。</Text>}
+        </Space>
       </Card>
     </div>
   );

@@ -427,8 +427,24 @@ export function TenantFinancePage({ catalog, reports, canvasUsersReport, saving,
           style={{ maxWidth: 420, marginBottom: 16 }}
           onChange={(event) => setLedgerAccountKeyword(event.target.value)}
         />
+        <Tabs
+          activeKey={ledgerScope}
+          onChange={(key) => setLedgerScope(key as FinanceEntryScope)}
+          items={[
+            {
+              key: 'account_adjustment',
+              label: `账户充值 / 人工扣费 (${adjustmentCount})`,
+              children: renderLedgerTable(accountLedgerRows),
+            },
+            {
+              key: 'tenant_request_charge',
+              label: `租户 API 请求扣费 (${requestChargeCount})`,
+              children: renderLedgerTable(tenantRequestChargeRows),
+            },
+          ]}
+        />
         {report ? (
-          <Space wrap style={{ marginBottom: 16 }}>
+          <Space wrap style={{ marginTop: 16 }}>
             <Text type="secondary">共匹配 {report.page.totalMatching} 条，当前第 {pageCursors.length} 页，每页 {report.page.limit} 条。</Text>
             <Button
               disabled={ledgerLoading || pageCursors.length <= 1}
@@ -449,22 +465,6 @@ export function TenantFinancePage({ catalog, reports, canvasUsersReport, saving,
             {report?.page.hasMore ? <Text type="secondary">仍有更早的匹配账本。</Text> : <Text type="secondary">已到达该条件下的最早账本。</Text>}
           </Space>
         ) : null}
-        <Tabs
-          activeKey={ledgerScope}
-          onChange={(key) => setLedgerScope(key as FinanceEntryScope)}
-          items={[
-            {
-              key: 'account_adjustment',
-              label: `账户充值 / 人工扣费 (${adjustmentCount})`,
-              children: renderLedgerTable(accountLedgerRows),
-            },
-            {
-              key: 'tenant_request_charge',
-              label: `租户 API 请求扣费 (${requestChargeCount})`,
-              children: renderLedgerTable(tenantRequestChargeRows),
-            },
-          ]}
-        />
       </Card>
 
       <Drawer
