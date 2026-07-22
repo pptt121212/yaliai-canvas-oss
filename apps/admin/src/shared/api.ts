@@ -139,6 +139,8 @@ export type BillingLedgerQuery = {
   apiKeyId?: string;
   createdAfter?: number;
   createdBefore?: number;
+  cursorCreatedAt?: number;
+  cursorId?: string;
 };
 
 export async function fetchBillingLedgerReport(query: BillingLedgerQuery = {}) {
@@ -148,6 +150,8 @@ export async function fetchBillingLedgerReport(query: BillingLedgerQuery = {}) {
   if (query.apiKeyId) params.set('apiKeyId', query.apiKeyId);
   if (query.createdAfter) params.set('createdAfter', String(query.createdAfter));
   if (query.createdBefore) params.set('createdBefore', String(query.createdBefore));
+  if (query.cursorCreatedAt) params.set('cursorCreatedAt', String(query.cursorCreatedAt));
+  if (query.cursorId) params.set('cursorId', query.cursorId);
   return requestJson<BillingLedgerReport>(`/v1/admin/reports/billing-ledger?${params.toString()}`, {
     method: 'GET',
   });
@@ -159,8 +163,18 @@ export async function fetchAuditLogReport(limit = 500) {
   });
 }
 
-export async function fetchChannelPerformanceReport(days = 7) {
-  return requestJson<ChannelPerformanceReport>(`/v1/admin/reports/channel-performance?days=${encodeURIComponent(String(days))}`, {
+export type ChannelPerformanceQuery = {
+  days?: number;
+  from?: number;
+  to?: number;
+};
+
+export async function fetchChannelPerformanceReport(query: ChannelPerformanceQuery = {}) {
+  const params = new URLSearchParams();
+  if (query.from) params.set('from', String(query.from));
+  if (query.to) params.set('to', String(query.to));
+  if (!query.from && !query.to) params.set('days', String(query.days || 7));
+  return requestJson<ChannelPerformanceReport>(`/v1/admin/reports/channel-performance?${params.toString()}`, {
     method: 'GET',
   });
 }
@@ -199,8 +213,28 @@ export async function clearRequestTraces() {
   );
 }
 
-export async function fetchTenantFinanceLedgerReport(limit = 1000) {
-  return requestJson<TenantFinanceLedgerReport>(`/v1/admin/reports/tenant-finance-ledger?limit=${encodeURIComponent(String(limit))}`, {
+export type TenantFinanceLedgerQuery = {
+  limit?: number;
+  tenantId?: string;
+  direction?: 'credit' | 'debit';
+  entryType?: 'account_adjustment' | 'tenant_request_charge';
+  createdAfter?: number;
+  createdBefore?: number;
+  cursorCreatedAt?: number;
+  cursorId?: string;
+};
+
+export async function fetchTenantFinanceLedgerReport(query: TenantFinanceLedgerQuery = {}) {
+  const params = new URLSearchParams();
+  params.set('limit', String(query.limit || 200));
+  if (query.tenantId) params.set('tenantId', query.tenantId);
+  if (query.direction) params.set('direction', query.direction);
+  if (query.entryType) params.set('entryType', query.entryType);
+  if (query.createdAfter) params.set('createdAfter', String(query.createdAfter));
+  if (query.createdBefore) params.set('createdBefore', String(query.createdBefore));
+  if (query.cursorCreatedAt) params.set('cursorCreatedAt', String(query.cursorCreatedAt));
+  if (query.cursorId) params.set('cursorId', query.cursorId);
+  return requestJson<TenantFinanceLedgerReport>(`/v1/admin/reports/tenant-finance-ledger?${params.toString()}`, {
     method: 'GET',
   });
 }

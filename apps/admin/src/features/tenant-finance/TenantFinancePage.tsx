@@ -1,6 +1,7 @@
 import { Button, Card, Drawer, Empty, Form, Input, InputNumber, Select, Space, Statistic, Table, Tabs, Typography } from 'antd';
 import { useMemo, useState } from 'react';
 import type { AdminConsoleCatalog, CanvasUserAdminReport, TenantFinanceLedgerReport } from '../../shared/types';
+import type { TenantFinanceLedgerQuery } from '../../shared/api';
 import { DrawerFooter, PageHeader, StatusDot, formatCredits, formatDateTime } from '../../shared/ui';
 
 const { Paragraph, Text } = Typography;
@@ -10,6 +11,8 @@ type TenantFinancePageProps = {
   report: TenantFinanceLedgerReport | null;
   canvasUsersReport: CanvasUserAdminReport | null;
   saving: boolean;
+  loading: boolean;
+  onQuery: (query: TenantFinanceLedgerQuery) => Promise<void>;
   onAdjust: (input: {
     tenantId: string;
     direction: 'credit' | 'debit';
@@ -80,12 +83,20 @@ function pickPrimaryAccount(users: CanvasUserAdminReport['rows'] = []): AccountI
   };
 }
 
-export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, onAdjust }: TenantFinancePageProps) {
+export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, loading, onQuery, onAdjust }: TenantFinancePageProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [searchDraft, setSearchDraft] = useState('');
   const [searchKeyword, setSearchKeyword] = useState('');
   const [ledgerAccountKeyword, setLedgerAccountKeyword] = useState('');
   const [ledgerScope, setLedgerScope] = useState<'account_adjustment' | 'tenant_request_charge'>('account_adjustment');
+  const [ledgerTenantId, setLedgerTenantId] = useState<string | undefined>();
+  const [ledgerDateFrom, setLedgerDateFrom] = useState('');
+  const [ledgerDateTo, setLedgerDateTo] = useState('');
+  const [activeLedgerQuery, setActiveLedgerQuery] = useState<TenantFinanceLedgerQuery>({
+    limit: 200,
+    entryType: 'account_adjustment',
+  });
+  const [pageCursors, setPageCursors] = useState<Array<{ createdAt: number; id: string } | undefined>>([undefined]);
   const [form] = Form.useForm<FinanceFormValues>();
   const selectedTenantId = Form.useWatch('tenantId', form);
 
@@ -225,6 +236,42 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
     form.setFieldValue('tenantId', tenantId);
   }
 
+  const buildLedgerQuery = (entryType = ledgerScope): TenantFinanceLedgerQuery => ({
+    limit: 200,
+    tenantId: ledgerTenantId,
+    entryType,
+    createdAfter: ledgerDateFrom ? new Date(`${ledgerDateFrom}T00:00:00`).getTime() : undefined,
+    createdBefore: ledgerDateTo ? new Date(`${ledgerDateTo}T00:00:00`).getTime() + 24 * 60 * 60 * 1000 : undefined,
+  });
+
+  const queryLedger = async (entryType = ledgerScope) => {
+    const nextQuery = buildLedgerQuery(entryType);
+    setLedgerScope(entryType);
+    setActiveLedgerQuery(nextQuery);
+    setPageCursors([undefined]);
+    await onQuery(nextQuery);
+  };
+
+  const loadLedgerPage = async (cursor: { createdAt: number; id: string } | undefined, cursors: Array<{ createdAt: number; id: string } | undefined>) => {
+    setPageCursors(cursors);
+    await onQuery({
+      ...activeLedgerQuery,
+      cursorCreatedAt: cursor?.createdAt,
+      cursorId: cursor?.id,
+    });
+  };
+
+  const resetLedgerQuery = async () => {
+    setLedgerTenantId(undefined);
+    setLedgerDateFrom('');
+    setLedgerDateTo('');
+    setLedgerAccountKeyword('');
+    const nextQuery = { limit: 200, entryType: ledgerScope } satisfies TenantFinanceLedgerQuery;
+    setActiveLedgerQuery(nextQuery);
+    setPageCursors([undefined]);
+    await onQuery(nextQuery);
+  };
+
   const selectedAccount = searchedTenantOptions.find((item) => item.value === selectedTenantId) || null;
 
   function renderLedgerTable(rows: typeof ledgerRows) {
@@ -314,16 +361,54 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
       </div>
 
       <Card>
+        <Space wrap style={{ marginBottom: 16 }}>
+          <Select
+            allowClear
+            showSearch
+            value={ledgerTenantId}
+            style={{ width: 320 }}
+            placeholder="按账户筛选"
+            options={tenantOptions}
+            optionFilterProp="searchText"
+            onChange={setLedgerTenantId}
+          />
+          <Input type="date" value={ledgerDateFrom} onChange={(event) => setLedgerDateFrom(event.target.value)} />
+          <Input type="date" value={ledgerDateTo} onChange={(event) => setLedgerDateTo(event.target.value)} />
+          <Button type="primary" loading={loading} onClick={() => void queryLedger()}>查询</Button>
+          <Button disabled={loading} onClick={() => void resetLedgerQuery()}>重置</Button>
+        </Space>
         <Input.Search
           allowClear
           value={ledgerAccountKeyword}
-          placeholder="搜索账户 / 邮箱 / 租户 / API Key"
+          placeholder="在当前页搜索账户 / 邮箱 / 租户 / API Key"
           style={{ maxWidth: 420, marginBottom: 16 }}
           onChange={(event) => setLedgerAccountKeyword(event.target.value)}
         />
+        {report ? (
+          <Space wrap style={{ marginBottom: 16 }}>
+            <Text type="secondary">当前第 {pageCursors.length} 页，每页 {report.page.limit} 条。</Text>
+            <Button
+              disabled={loading || pageCursors.length <= 1}
+              onClick={() => void loadLedgerPage(pageCursors[pageCursors.length - 2], pageCursors.slice(0, -1))}
+            >
+              上一页
+            </Button>
+            <Button
+              disabled={loading || !report.page.hasMore || !report.page.nextCursor}
+              onClick={() => {
+                const nextCursor = report.page.nextCursor;
+                if (!nextCursor) return;
+                void loadLedgerPage(nextCursor, [...pageCursors, nextCursor]);
+              }}
+            >
+              下一页
+            </Button>
+            {report.page.hasMore ? <Text type="secondary">仍有更早的匹配账本。</Text> : <Text type="secondary">已到达该条件下的最早账本。</Text>}
+          </Space>
+        ) : null}
         <Tabs
           activeKey={ledgerScope}
-          onChange={(key) => setLedgerScope(key as 'account_adjustment' | 'tenant_request_charge')}
+          onChange={(key) => void queryLedger(key as 'account_adjustment' | 'tenant_request_charge')}
           items={[
             {
               key: 'account_adjustment',

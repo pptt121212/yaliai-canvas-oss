@@ -232,6 +232,17 @@ export type TenantFinanceBalanceRecord = {
   updatedAt: number;
 };
 
+export type LedgerCursor = {
+  createdAt: number;
+  id: string;
+};
+
+export type LedgerPage<T> = {
+  rows: T[];
+  hasMore: boolean;
+  nextCursor?: LedgerCursor;
+};
+
 export type AuditLogRecord = {
   id: string;
   createdAt: number;
@@ -591,6 +602,15 @@ export interface AsyncOperationalRepository {
     createdAfter?: number;
     createdBefore?: number;
   }): Promise<BillingLedgerRecord[]>;
+  listBillingLedgerPage(input: {
+    limit: number;
+    operations?: BillingLedgerOperation[];
+    tenantId?: string;
+    apiKeyId?: string;
+    createdAfter?: number;
+    createdBefore?: number;
+    cursor?: LedgerCursor;
+  }): Promise<LedgerPage<BillingLedgerRecord>>;
   purgeTenantData(tenantId: string): Promise<{
     traces: number;
     billing: number;
@@ -612,6 +632,15 @@ export interface AsyncOperationalRepository {
   getTenantCreditBalance(tenantId: string, currency: 'cny'): Promise<TenantCreditBalanceRecord | null>;
   createTenantFinanceLedger(input: TenantFinanceLedgerCreateInput): Promise<TenantFinanceLedgerRecord>;
   listTenantFinanceLedger(limit: number): Promise<TenantFinanceLedgerRecord[]>;
+  listTenantFinanceLedgerPage(input: {
+    limit: number;
+    tenantId?: string;
+    direction?: TenantFinanceLedgerDirection;
+    entryType?: 'account_adjustment' | 'tenant_request_charge';
+    createdAfter?: number;
+    createdBefore?: number;
+    cursor?: LedgerCursor;
+  }): Promise<LedgerPage<TenantFinanceLedgerRecord>>;
   listTenantFinanceLedgerByTenant(input: {
     tenantId: string;
     currency: 'cny';

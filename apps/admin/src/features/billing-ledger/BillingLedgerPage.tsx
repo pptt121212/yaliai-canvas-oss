@@ -89,15 +89,13 @@ function operationLabel(value: string) {
 }
 
 export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading, onQuery }: BillingLedgerPageProps) {
-  if (!report) {
-    return null;
-  }
-
   const [activeTab, setActiveTab] = useState<'image' | 'chat'>('image');
   const [savedFilter] = useState(readBillingLedgerFilterState);
   const [tenantId, setTenantId] = useState<string | undefined>(savedFilter.tenantId);
   const [dateFrom, setDateFrom] = useState(savedFilter.dateFrom);
   const [dateTo, setDateTo] = useState(savedFilter.dateTo);
+  const [activeQuery, setActiveQuery] = useState<BillingLedgerQuery>({ limit: 200 });
+  const [pageCursors, setPageCursors] = useState<Array<{ createdAt: number; id: string } | undefined>>([undefined]);
   const accountOptions = useMemo(() => {
     const usersByTenant = new Map<string, CanvasUserAdminReport['rows'][number]>();
     for (const user of canvasUsersReport?.rows || []) {
@@ -115,16 +113,37 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
   const queryLedger = async () => {
     const createdAfter = dateFrom ? new Date(`${dateFrom}T00:00:00`).getTime() : undefined;
     const createdBefore = dateTo ? new Date(`${dateTo}T00:00:00`).getTime() + 24 * 60 * 60 * 1000 : undefined;
-    await onQuery({ tenantId, createdAfter, createdBefore, limit: 5000 });
+    const nextQuery = { tenantId, createdAfter, createdBefore, limit: 200 } satisfies BillingLedgerQuery;
+    setActiveQuery(nextQuery);
+    setPageCursors([undefined]);
+    await onQuery(nextQuery);
     persistFilter({ tenantId, dateFrom, dateTo });
   };
   const resetQuery = async () => {
     setTenantId(undefined);
     setDateFrom('');
     setDateTo('');
-    await onQuery({ limit: 1000 });
+    const nextQuery = { limit: 200 } satisfies BillingLedgerQuery;
+    setActiveQuery(nextQuery);
+    setPageCursors([undefined]);
+    await onQuery(nextQuery);
     persistFilter({ dateFrom: '', dateTo: '' });
   };
+  const loadPage = async (cursor: { createdAt: number; id: string } | undefined, cursors: Array<{ createdAt: number; id: string } | undefined>) => {
+    setPageCursors(cursors);
+    await onQuery({
+      ...activeQuery,
+      cursorCreatedAt: cursor?.createdAt,
+      cursorId: cursor?.id,
+    });
+  };
+
+  if (!report) {
+    return null;
+  }
+
+  const canLoadPrevious = pageCursors.length > 1;
+  const canLoadNext = report.page.hasMore && Boolean(report.page.nextCursor);
   const isChat = activeTab === 'chat';
   const rows = isChat ? report.chat.rows : report.image.rows;
   const chargedRows = rows.filter((row) => row.status === 'charged');
@@ -250,6 +269,27 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
           ? '聊天收益来自实际已扣的按次流水；上游成本取本次请求实际采用线路的固定 chatUnit，后续修改线路配置不会改写历史流水。'
           : '请求尺寸和请求画质以实际提交给上游的参数为准；实际尺寸来自成功响应。常规共享线路按请求尺寸档位和请求画质结算；固定线路一口价按张结算。'}
       />
+
+      <Space wrap>
+        <Text type="secondary">当前第 {pageCursors.length} 页，每页 {report.page.limit} 条。</Text>
+        <Button
+          disabled={loading || !canLoadPrevious}
+          onClick={() => void loadPage(pageCursors[pageCursors.length - 2], pageCursors.slice(0, -1))}
+        >
+          上一页
+        </Button>
+        <Button
+          disabled={loading || !canLoadNext}
+          onClick={() => {
+            const nextCursor = report.page.nextCursor;
+            if (!nextCursor) return;
+            void loadPage(nextCursor, [...pageCursors, nextCursor]);
+          }}
+        >
+          下一页
+        </Button>
+        {report.page.hasMore ? <Text type="secondary">仍有更早的匹配流水。</Text> : <Text type="secondary">已到达该条件下的最早流水。</Text>}
+      </Space>
 
       <StatStrip
         items={[

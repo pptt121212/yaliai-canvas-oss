@@ -702,9 +702,12 @@ async function ensureOperationalTables(pool: Pool, schema: string) {
     await pool.query(`create index if not exists ${schema}_request_traces_channel_upstream_created_idx on ${schema}.request_traces (channel_id, upstream_id, created_at desc)`);
     await pool.query(`create index if not exists ${schema}_request_traces_scope_channel_created_idx on ${schema}.request_traces (scope, channel_id, created_at desc, upstream_id)`);
     await pool.query(`create index if not exists ${schema}_billing_ledger_created_at_idx on ${schema}.billing_ledger (created_at desc)`);
+    await pool.query(`create index if not exists ${schema}_billing_ledger_created_id_idx on ${schema}.billing_ledger (created_at desc, id desc)`);
     await pool.query(`create index if not exists ${schema}_billing_ledger_tenant_status_created_idx on ${schema}.billing_ledger (tenant_id, status, created_at desc)`);
     await pool.query(`create index if not exists ${schema}_billing_ledger_tenant_created_idx on ${schema}.billing_ledger (tenant_id, created_at desc)`);
+    await pool.query(`create index if not exists ${schema}_billing_ledger_tenant_created_id_idx on ${schema}.billing_ledger (tenant_id, created_at desc, id desc)`);
     await pool.query(`create index if not exists ${schema}_billing_ledger_api_key_created_idx on ${schema}.billing_ledger (api_key_id, created_at desc)`);
+    await pool.query(`create index if not exists ${schema}_billing_ledger_api_key_created_id_idx on ${schema}.billing_ledger (api_key_id, created_at desc, id desc)`);
     await pool.query(`create index if not exists ${schema}_billing_ledger_request_id_idx on ${schema}.billing_ledger (request_id)`);
     await pool.query(`create index if not exists ${schema}_billing_ledger_channel_upstream_created_idx on ${schema}.billing_ledger (channel_id, upstream_id, created_at desc)`);
     await pool.query(`create index if not exists ${schema}_billing_ledger_operation_created_idx on ${schema}.billing_ledger (operation, created_at desc)`);
@@ -716,7 +719,9 @@ async function ensureOperationalTables(pool: Pool, schema: string) {
     await pool.query(`create index if not exists ${schema}_task_master_created_channel_upstream_idx on ${schema}.task_master (created_at desc, channel_id, upstream_id) where coalesce(request_payload ->> '_provider_source', '') <> 'user_supplied'`);
     await pool.query(`create index if not exists ${schema}_task_master_image_created_idx on ${schema}.task_master (created_at desc, status) where coalesce(channel_id, '') in ('image_generation', 'channel_image_generation') and coalesce(request_payload ->> '_provider_source', '') <> 'user_supplied'`);
     await pool.query(`create index if not exists ${schema}_tenant_finance_ledger_created_at_idx on ${schema}.tenant_finance_ledger (created_at desc)`);
+    await pool.query(`create index if not exists ${schema}_tenant_finance_ledger_created_id_idx on ${schema}.tenant_finance_ledger (created_at desc, id desc)`);
     await pool.query(`create index if not exists ${schema}_tenant_finance_ledger_tenant_created_idx on ${schema}.tenant_finance_ledger (tenant_id, created_at desc)`);
+    await pool.query(`create index if not exists ${schema}_tenant_finance_ledger_tenant_created_id_idx on ${schema}.tenant_finance_ledger (tenant_id, created_at desc, id desc)`);
     await pool.query(`create index if not exists ${schema}_tenant_finance_ledger_tenant_currency_created_idx on ${schema}.tenant_finance_ledger (tenant_id, currency, created_at desc)`);
     await pool.query(`drop index if exists ${schema}.${schema}_tenant_finance_ledger_tenant_currency_direction_created_`);
     await pool.query(`create index if not exists ${schema}_finance_ledger_tenant_currency_direction_created_idx on ${schema}.tenant_finance_ledger (tenant_id, currency, direction, created_at desc)`);
@@ -1358,23 +1363,86 @@ export function createPostgresOperationalRepository(
         detail: row.detail || {},
       } satisfies BillingLedgerRecord));
     },
+    async listBillingLedgerPage(input) {
+      await ensureOperationalTables(pool, schema);
+      const operations = Array.from(new Set((input.operations || []).filter((operation) => (
+        operation === 'generations' || operation === 'edits' || operation === 'chat_completions'
+      ))));
+      const conditions: string[] = [];
+      const params: Array<number | string | string[]> = [];
+      if (operations.length) {
+        params.push(operations);
+        conditions.push(`operation = any($${params.length}::text[])`);
+      }
+      if (input.tenantId) {
+        params.push(input.tenantId);
+        conditions.push(`tenant_id = $${params.length}`);
+      }
+      if (input.apiKeyId) {
+        params.push(input.apiKeyId);
+        conditions.push(`api_key_id = $${params.length}`);
+      }
+      if (Number.isFinite(input.createdAfter) && Number(input.createdAfter) > 0) {
+        params.push(Number(input.createdAfter));
+        conditions.push(`created_at >= $${params.length}`);
+      }
+      if (Number.isFinite(input.createdBefore) && Number(input.createdBefore) > 0) {
+        params.push(Number(input.createdBefore));
+        conditions.push(`created_at < $${params.length}`);
+      }
+      if (input.cursor) {
+        params.push(input.cursor.createdAt, input.cursor.id);
+        conditions.push(`(created_at < $${params.length - 1} or (created_at = $${params.length - 1} and id < $${params.length}))`);
+      }
+      const limit = Math.max(1, Math.min(500, Number(input.limit || 100)));
+      params.push(limit + 1);
+      const where = conditions.length ? `where ${conditions.join(' and ')}` : '';
+      const result = await pool.query(
+        `select * from ${schema}.billing_ledger ${where} order by created_at desc, id desc limit $${params.length}`,
+        params,
+      );
+      const pageRows = result.rows.slice(0, limit).map((row) => ({
+        id: row.id,
+        createdAt: Number(row.created_at),
+        updatedAt: Number(row.updated_at),
+        tenantId: row.tenant_id,
+        apiKeyId: row.api_key_id,
+        channelId: row.channel_id,
+        upstreamId: row.upstream_id ?? undefined,
+        requestId: row.request_id,
+        taskId: row.task_id ?? undefined,
+        operation: row.operation,
+        currency: row.currency,
+        reservedCredits: Number(row.reserved_credits),
+        chargedCredits: Number(row.charged_credits),
+        status: row.status,
+        model: row.model,
+        size: row.size ?? undefined,
+        detail: row.detail || {},
+      } satisfies BillingLedgerRecord));
+      const last = pageRows[pageRows.length - 1];
+      return {
+        rows: pageRows,
+        hasMore: result.rows.length > limit,
+        nextCursor: result.rows.length > limit && last ? { createdAt: last.createdAt, id: last.id } : undefined,
+      };
+    },
     async purgeTenantData(tenantId: string) {
       await ensureOperationalTables(pool, schema);
-      const [traceResult, billingResult, taskResult, creditBalanceResult, financeLedgerResult, financeBalanceResult] = await Promise.all([
+      // Financial balances and their immutable ledger are intentionally excluded.
+      const [traceResult, billingResult, taskResult, creditBalanceResult] = await Promise.all([
         pool.query(`delete from ${schema}.request_traces where tenant_id = $1`, [tenantId]),
         pool.query(`delete from ${schema}.billing_ledger where tenant_id = $1`, [tenantId]),
         pool.query(`delete from ${schema}.task_master where tenant_id = $1`, [tenantId]),
         pool.query(`delete from ${schema}.tenant_credit_balances where tenant_id = $1`, [tenantId]),
-        pool.query(`delete from ${schema}.tenant_finance_ledger where tenant_id = $1`, [tenantId]),
-        pool.query(`delete from ${schema}.tenant_finance_balances where tenant_id = $1`, [tenantId]),
       ]);
       return {
         traces: traceResult.rowCount || 0,
         billing: billingResult.rowCount || 0,
         tasks: taskResult.rowCount || 0,
         creditBalances: creditBalanceResult.rowCount || 0,
-        financeLedger: financeLedgerResult.rowCount || 0,
-        financeBalances: financeBalanceResult.rowCount || 0,
+        financeLedger: 0,
+        financeBalances: 0,
       };
     },
     async sumChargedCreditsForTenant(tenantId: string, fromInclusive: number, toExclusive: number) {
@@ -1561,6 +1629,51 @@ export function createPostgresOperationalRepository(
         note: row.note,
         detail: row.detail || {},
       } satisfies TenantFinanceLedgerRecord));
+    },
+    async listTenantFinanceLedgerPage(input) {
+      await ensureOperationalTables(pool, schema);
+      const conditions: string[] = [];
+      const params: Array<number | string> = [];
+      if (input.tenantId) {
+        params.push(input.tenantId);
+        conditions.push(`tenant_id = $${params.length}`);
+      }
+      if (input.direction) {
+        params.push(input.direction);
+        conditions.push(`direction = $${params.length}`);
+      }
+      if (Number.isFinite(input.createdAfter) && Number(input.createdAfter) > 0) {
+        params.push(Number(input.createdAfter));
+        conditions.push(`created_at >= $${params.length}`);
+      }
+      if (Number.isFinite(input.createdBefore) && Number(input.createdBefore) > 0) {
+        params.push(Number(input.createdBefore));
+        conditions.push(`created_at < $${params.length}`);
+      }
+      const requestChargePredicate = "direction = 'debit' and (operator_id like 'system:%' or coalesce(detail ->> 'source', '') like '%_request_charge')";
+      if (input.entryType === 'tenant_request_charge') {
+        conditions.push(`(${requestChargePredicate})`);
+      } else if (input.entryType === 'account_adjustment') {
+        conditions.push(`not (${requestChargePredicate})`);
+      }
+      if (input.cursor) {
+        params.push(input.cursor.createdAt, input.cursor.id);
+        conditions.push(`(created_at < $${params.length - 1} or (created_at = $${params.length - 1} and id < $${params.length}))`);
+      }
+      const limit = Math.max(1, Math.min(500, Number(input.limit || 100)));
+      params.push(limit + 1);
+      const where = conditions.length ? `where ${conditions.join(' and ')}` : '';
+      const result = await pool.query(
+        `select * from ${schema}.tenant_finance_ledger ${where} order by created_at desc, id desc limit $${params.length}`,
+        params,
+      );
+      const pageRows = result.rows.slice(0, limit).map(mapTenantFinanceLedgerRow);
+      const last = pageRows[pageRows.length - 1];
+      return {
+        rows: pageRows,
+        hasMore: result.rows.length > limit,
+        nextCursor: result.rows.length > limit && last ? { createdAt: last.createdAt, id: last.id } : undefined,
+      };
     },
     async listTenantFinanceLedgerByTenant(input) {
       await ensureOperationalTables(pool, schema);

@@ -311,6 +311,12 @@ export type BillingLedgerRow = {
 export type BillingLedgerReport = {
   generatedAt: number;
   total: number;
+  page: {
+    limit: number;
+    currentCursor?: { createdAt: number; id: string };
+    hasMore: boolean;
+    nextCursor?: { createdAt: number; id: string };
+  };
   image: {
     total: number;
     rows: BillingLedgerRow[];
@@ -584,6 +590,12 @@ export type TenantFinanceLedgerRow = {
 export type TenantFinanceLedgerReport = {
   generatedAt: number;
   total: number;
+  page: {
+    limit: number;
+    currentCursor?: { createdAt: number; id: string };
+    hasMore: boolean;
+    nextCursor?: { createdAt: number; id: string };
+  };
   balances: TenantFinanceBalanceRow[];
   rows: TenantFinanceLedgerRow[];
 };

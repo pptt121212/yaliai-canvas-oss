@@ -1,6 +1,6 @@
 import { Alert, Button, Card, Input, Select, Space, Switch, Table, Tabs, Tag, Typography } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
-import { fetchChannelPerformanceReport } from '../../shared/api';
+import { fetchChannelPerformanceReport, type ChannelPerformanceQuery } from '../../shared/api';
 import type {
   AdminConsoleCatalog,
   ChannelPerformanceMetric,
@@ -132,6 +132,19 @@ type ChannelDraft = {
   upstreamPolicies: ConsoleChannelUpstreamPolicy[];
 };
 
+type MetricWindow = 'today' | '24h' | '7d' | '30d';
+
+function resolveMetricWindowQuery(window: MetricWindow): ChannelPerformanceQuery {
+  if (window === 'today') {
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    return { from: startOfToday.getTime(), to: now.getTime() };
+  }
+  if (window === '24h') return { days: 1 };
+  if (window === '30d') return { days: 30 };
+  return { days: 7 };
+}
+
 function resolveChannel(catalog: AdminConsoleCatalog | null, id: keyof typeof fixedChannels) {
   return catalog?.channels.find((item) => item.id === id) || fixedChannels[id];
 }
@@ -164,18 +177,18 @@ function sameStringArray(left: string[], right: string[]) {
 
 export function ChannelsPage({ catalog, saving, onSave, onSaveUpstream }: ChannelsPageProps) {
   const [drafts, setDrafts] = useState<Record<string, ChannelDraft>>({});
-  const [metricDays, setMetricDays] = useState(7);
+  const [metricWindow, setMetricWindow] = useState<MetricWindow>('today');
   const [performance, setPerformance] = useState<ChannelPerformanceReport | null>(null);
   const [performanceLoading, setPerformanceLoading] = useState(false);
   const [performanceError, setPerformanceError] = useState('');
   const upstreams = catalog?.upstreams || [];
   const channelIds: Array<keyof typeof fixedChannels> = ['channel_image_generation', 'channel_text_processing'];
 
-  const loadPerformance = useCallback(async (days: number) => {
+  const loadPerformance = useCallback(async (window: MetricWindow) => {
     setPerformanceLoading(true);
     setPerformanceError('');
     try {
-      setPerformance(await fetchChannelPerformanceReport(days));
+      setPerformance(await fetchChannelPerformanceReport(resolveMetricWindowQuery(window)));
     } catch (error) {
       setPerformanceError(error instanceof Error ? error.message : '业务通道统计读取失败');
     } finally {
@@ -184,8 +197,8 @@ export function ChannelsPage({ catalog, saving, onSave, onSaveUpstream }: Channe
   }, []);
 
   useEffect(() => {
-    void loadPerformance(metricDays);
-  }, [loadPerformance, metricDays]);
+    void loadPerformance(metricWindow);
+  }, [loadPerformance, metricWindow]);
 
   useEffect(() => {
     const next: Record<string, ChannelDraft> = {};
@@ -540,16 +553,17 @@ export function ChannelsPage({ catalog, saving, onSave, onSaveUpstream }: Channe
         </div>
         <Space wrap>
           <Select
-            value={metricDays}
+            value={metricWindow}
             style={{ width: 120 }}
             options={[
-              { value: 1, label: '最近 24 小时' },
-              { value: 7, label: '最近 7 天' },
-              { value: 30, label: '最近 30 天' },
+              { value: 'today', label: '今天' },
+              { value: '24h', label: '最近 24 小时' },
+              { value: '7d', label: '最近 7 天' },
+              { value: '30d', label: '最近 30 天' },
             ]}
-            onChange={setMetricDays}
+            onChange={setMetricWindow}
           />
-          <Button loading={performanceLoading} onClick={() => void loadPerformance(metricDays)}>
+          <Button loading={performanceLoading} onClick={() => void loadPerformance(metricWindow)}>
             刷新数据
           </Button>
         </Space>

@@ -766,17 +766,32 @@ const resolutionAuditQuerySchema = z.object({
 });
 
 const billingLedgerQuerySchema = z.object({
-  limit: z.coerce.number().int().positive().max(5000).optional(),
+  limit: z.coerce.number().int().positive().max(500).optional(),
   tenantId: z.string().trim().min(1).optional(),
   apiKeyId: z.string().trim().min(1).optional(),
   createdAfter: z.coerce.number().int().nonnegative().optional(),
   createdBefore: z.coerce.number().int().positive().optional(),
+  cursorCreatedAt: z.coerce.number().int().positive().optional(),
+  cursorId: z.string().trim().min(1).optional(),
 }).refine((value) => !value.createdAfter || !value.createdBefore || value.createdBefore > value.createdAfter, {
   message: 'created_before_must_be_after_created_after',
+}).refine((value) => Boolean(value.cursorCreatedAt) === Boolean(value.cursorId), {
+  message: 'billing_ledger_cursor_requires_created_at_and_id',
 });
 
 const tenantFinanceLedgerQuerySchema = z.object({
-  limit: z.coerce.number().int().positive().max(5000).optional(),
+  limit: z.coerce.number().int().positive().max(500).optional(),
+  tenantId: z.string().trim().min(1).optional(),
+  direction: z.enum(['credit', 'debit']).optional(),
+  entryType: z.enum(['account_adjustment', 'tenant_request_charge']).optional(),
+  createdAfter: z.coerce.number().int().nonnegative().optional(),
+  createdBefore: z.coerce.number().int().positive().optional(),
+  cursorCreatedAt: z.coerce.number().int().positive().optional(),
+  cursorId: z.string().trim().min(1).optional(),
+}).refine((value) => !value.createdAfter || !value.createdBefore || value.createdBefore > value.createdAfter, {
+  message: 'created_before_must_be_after_created_after',
+}).refine((value) => Boolean(value.cursorCreatedAt) === Boolean(value.cursorId), {
+  message: 'tenant_finance_cursor_requires_created_at_and_id',
 });
 
 const canvasUsersQuerySchema = z.object({
@@ -1345,9 +1360,13 @@ function computeEligibleSuccessRate(completedCount: number, eligibleRequestCount
   return completedCount / eligibleRequestCount;
 }
 
-async function buildChannelPerformanceReport(days: number) {
-  const toExclusive = Date.now();
-  const fromInclusive = toExclusive - days * 24 * 60 * 60 * 1000;
+async function buildChannelPerformanceReport(input: {
+  days?: number;
+  fromInclusive?: number;
+  toExclusive?: number;
+}) {
+  const toExclusive = input.toExclusive || Date.now();
+  const fromInclusive = input.fromInclusive || (toExclusive - (input.days || 7) * 24 * 60 * 60 * 1000);
   const catalog = adminConsoleCatalogStore.get();
   const runtimeProviders = await listFreshAdminRuntimeProviders();
   const performanceData = await operationalRepository.getChannelPerformanceData(fromInclusive, toExclusive);
@@ -1612,7 +1631,7 @@ async function buildChannelPerformanceReport(days: number) {
 
   return {
     generatedAt: Date.now(),
-    windowDays: days,
+    windowDays: (toExclusive - fromInclusive) / (24 * 60 * 60 * 1000),
     fromInclusive,
     toExclusive,
     rows: [
@@ -1895,18 +1914,22 @@ export async function registerAdminRoutes(app: FastifyInstance) {
   app.get('/v1/admin/reports/billing-ledger', async (request, reply) => {
     requireAdmin(request, reply);
     const query = billingLedgerQuerySchema.parse(request.query);
-    const [catalog, billingRows, tasks] = await Promise.all([
+    const [catalog, billingPage, tasks] = await Promise.all([
       adminConsoleCatalogStore.refreshAsync(),
-      operationalRepository.listBillingLedger({
-        limit: query.limit || 1000,
+      operationalRepository.listBillingLedgerPage({
+        limit: query.limit || 200,
         operations: ['generations', 'edits', 'chat_completions'],
         tenantId: query.tenantId,
         apiKeyId: query.apiKeyId,
         createdAfter: query.createdAfter,
         createdBefore: query.createdBefore,
+        cursor: query.cursorCreatedAt && query.cursorId
+          ? { createdAt: query.cursorCreatedAt, id: query.cursorId }
+          : undefined,
       }),
-      operationalRepository.listTasks(query.limit || 1000),
+      operationalRepository.listTasks(query.limit || 200),
     ]);
+    const billingRows = billingPage.rows;
     const imageRows = billingRows.filter((row) => row.operation === 'generations' || row.operation === 'edits');
     const chatRows = billingRows.filter((row) => row.operation === 'chat_completions');
     const tenantNameById = new Map(catalog.tenants.map((item) => [item.id, item.name]));
@@ -2004,6 +2027,14 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     return {
       generatedAt: Date.now(),
       total: image.length + chat.length,
+      page: {
+        limit: query.limit || 200,
+        currentCursor: query.cursorCreatedAt && query.cursorId
+          ? { createdAt: query.cursorCreatedAt, id: query.cursorId }
+          : undefined,
+        hasMore: billingPage.hasMore,
+        nextCursor: billingPage.nextCursor,
+      },
       image: { total: image.length, rows: image },
       chat: { total: chat.length, rows: chat },
     };
@@ -2057,8 +2088,18 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     requireAdmin(request, reply);
     const query = z.object({
       days: z.coerce.number().int().min(1).max(30).optional(),
+      from: z.coerce.number().int().positive().optional(),
+      to: z.coerce.number().int().positive().optional(),
+    }).refine((value) => !value.from || !value.to || value.to > value.from, {
+      message: 'to_must_be_after_from',
+    }).refine((value) => !value.from || !value.to || value.to - value.from <= 31 * 24 * 60 * 60 * 1000, {
+      message: 'channel_performance_range_must_not_exceed_31_days',
     }).parse(request.query);
-    return buildChannelPerformanceReport(query.days || 7);
+    return buildChannelPerformanceReport({
+      days: query.days || 7,
+      fromInclusive: query.from,
+      toExclusive: query.to,
+    });
   });
 
   app.get('/v1/admin/reports/operational-rollups', async (request, reply) => {
@@ -2226,11 +2267,22 @@ export async function registerAdminRoutes(app: FastifyInstance) {
   app.get('/v1/admin/reports/tenant-finance-ledger', async (request, reply) => {
     requireAdmin(request, reply);
     const query = tenantFinanceLedgerQuerySchema.parse(request.query);
-    const [catalog, rows, balances] = await Promise.all([
+    const [catalog, ledgerPage, balances] = await Promise.all([
       adminConsoleCatalogStore.refreshAsync(),
-      operationalRepository.listTenantFinanceLedger(query.limit || 1000),
+      operationalRepository.listTenantFinanceLedgerPage({
+        limit: query.limit || 200,
+        tenantId: query.tenantId,
+        direction: query.direction,
+        entryType: query.entryType,
+        createdAfter: query.createdAfter,
+        createdBefore: query.createdBefore,
+        cursor: query.cursorCreatedAt && query.cursorId
+          ? { createdAt: query.cursorCreatedAt, id: query.cursorId }
+          : undefined,
+      }),
       operationalRepository.listTenantFinanceBalances(),
     ]);
+    const rows = ledgerPage.rows;
     const tenantNameById = new Map(catalog.tenants.map((item) => [item.id, item.name]));
     const apiKeyNameById = new Map(catalog.apiKeys.map((item) => [item.id, item.name]));
     const balanceByTenantId = new Map(balances.map((item) => [item.tenantId, item]));
@@ -2269,6 +2321,14 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     return {
       generatedAt: Date.now(),
       total: rows.length,
+      page: {
+        limit: query.limit || 200,
+        currentCursor: query.cursorCreatedAt && query.cursorId
+          ? { createdAt: query.cursorCreatedAt, id: query.cursorId }
+          : undefined,
+        hasMore: ledgerPage.hasMore,
+        nextCursor: ledgerPage.nextCursor,
+      },
       balances: balances.map((item) => ({
         ...item,
         tenantName: tenantNameById.get(item.tenantId) || item.tenantId,

@@ -271,7 +271,7 @@ export function AdminApp() {
         await Promise.all([catalogPromise, controlPlanePromise]);
       } else if (view === 'tenant-finance') {
         const [report, canvasReport] = await Promise.all([
-          fetchTenantFinanceLedgerReport(),
+          fetchTenantFinanceLedgerReport({ limit: 200, entryType: 'account_adjustment' }),
           fetchCanvasUsersReport(),
         ]);
         setTenantFinanceReport(report);
@@ -430,6 +430,15 @@ export function AdminApp() {
           report={tenantFinanceReport}
           canvasUsersReport={canvasUsersReport}
           saving={saving}
+          loading={pageLoading}
+          onQuery={async (query) => {
+            setPageLoading(true);
+            try {
+              setTenantFinanceReport(await fetchTenantFinanceLedgerReport(query));
+            } finally {
+              setPageLoading(false);
+            }
+          }}
           onAdjust={(input) => wrapSave(
             () => adjustTenantFinanceBalance(input),
             input.direction === 'credit' ? '充值已记账' : '扣费已记账',
