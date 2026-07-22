@@ -24,6 +24,30 @@ type BillingLedgerPageProps = {
   onQuery: (query: BillingLedgerQuery) => Promise<void>;
 };
 
+const billingFilterStorageKey = 'yali-admin.billing-ledger-filter';
+
+type BillingLedgerFilterState = {
+  tenantId?: string;
+  dateFrom: string;
+  dateTo: string;
+};
+
+function readBillingLedgerFilterState(): BillingLedgerFilterState {
+  if (typeof window === 'undefined') {
+    return { dateFrom: '', dateTo: '' };
+  }
+  try {
+    const value = JSON.parse(window.sessionStorage.getItem(billingFilterStorageKey) || '{}') as Partial<BillingLedgerFilterState>;
+    return {
+      tenantId: typeof value.tenantId === 'string' && value.tenantId ? value.tenantId : undefined,
+      dateFrom: typeof value.dateFrom === 'string' ? value.dateFrom : '',
+      dateTo: typeof value.dateTo === 'string' ? value.dateTo : '',
+    };
+  } catch {
+    return { dateFrom: '', dateTo: '' };
+  }
+}
+
 function renderTierTag(value?: string) {
   const tier = String(value || '').trim();
   if (!tier) {
@@ -70,9 +94,10 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
   }
 
   const [activeTab, setActiveTab] = useState<'image' | 'chat'>('image');
-  const [tenantId, setTenantId] = useState<string>();
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
+  const [savedFilter] = useState(readBillingLedgerFilterState);
+  const [tenantId, setTenantId] = useState<string | undefined>(savedFilter.tenantId);
+  const [dateFrom, setDateFrom] = useState(savedFilter.dateFrom);
+  const [dateTo, setDateTo] = useState(savedFilter.dateTo);
   const accountOptions = useMemo(() => {
     const usersByTenant = new Map<string, CanvasUserAdminReport['rows'][number]>();
     for (const user of canvasUsersReport?.rows || []) {
@@ -84,16 +109,21 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
       return { value: tenant.id, label: label || tenant.id, searchText: `${label} ${tenant.id}`.toLowerCase() };
     });
   }, [canvasUsersReport, catalog]);
+  const persistFilter = (filter: BillingLedgerFilterState) => {
+    window.sessionStorage.setItem(billingFilterStorageKey, JSON.stringify(filter));
+  };
   const queryLedger = async () => {
     const createdAfter = dateFrom ? new Date(`${dateFrom}T00:00:00`).getTime() : undefined;
     const createdBefore = dateTo ? new Date(`${dateTo}T00:00:00`).getTime() + 24 * 60 * 60 * 1000 : undefined;
     await onQuery({ tenantId, createdAfter, createdBefore, limit: 5000 });
+    persistFilter({ tenantId, dateFrom, dateTo });
   };
   const resetQuery = async () => {
     setTenantId(undefined);
     setDateFrom('');
     setDateTo('');
     await onQuery({ limit: 1000 });
+    persistFilter({ dateFrom: '', dateTo: '' });
   };
   const isChat = activeTab === 'chat';
   const rows = isChat ? report.chat.rows : report.image.rows;
