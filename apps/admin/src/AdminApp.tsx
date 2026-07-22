@@ -243,7 +243,7 @@ export function AdminApp() {
         setOverview(overviewPayload);
       } else if (view === 'billing-ledger') {
         const [report, canvasReport] = await Promise.all([
-          fetchBillingLedgerReport(),
+          fetchBillingLedgerReport({ limit: 200, scope: 'image' }),
           fetchCanvasUsersReport(),
         ]);
         setBillingLedgerReport(report);

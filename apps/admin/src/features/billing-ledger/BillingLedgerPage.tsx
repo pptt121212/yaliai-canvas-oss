@@ -94,7 +94,7 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
   const [tenantId, setTenantId] = useState<string | undefined>(savedFilter.tenantId);
   const [dateFrom, setDateFrom] = useState(savedFilter.dateFrom);
   const [dateTo, setDateTo] = useState(savedFilter.dateTo);
-  const [activeQuery, setActiveQuery] = useState<BillingLedgerQuery>({ limit: 200 });
+  const [activeQuery, setActiveQuery] = useState<BillingLedgerQuery>({ limit: 200, scope: 'image' });
   const [pageCursors, setPageCursors] = useState<Array<{ createdAt: number; id: string } | undefined>>([undefined]);
   const accountOptions = useMemo(() => {
     const usersByTenant = new Map<string, CanvasUserAdminReport['rows'][number]>();
@@ -110,10 +110,17 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
   const persistFilter = (filter: BillingLedgerFilterState) => {
     window.sessionStorage.setItem(billingFilterStorageKey, JSON.stringify(filter));
   };
-  const queryLedger = async () => {
+  const queryLedger = async (scope = activeTab) => {
     const createdAfter = dateFrom ? new Date(`${dateFrom}T00:00:00`).getTime() : undefined;
     const createdBefore = dateTo ? new Date(`${dateTo}T00:00:00`).getTime() + 24 * 60 * 60 * 1000 : undefined;
-    const nextQuery = { tenantId, createdAfter, createdBefore, limit: 200 } satisfies BillingLedgerQuery;
+    const nextQuery = {
+      tenantId,
+      createdAfter,
+      createdBefore,
+      limit: createdAfter && createdBefore ? 5000 : 200,
+      scope,
+    } satisfies BillingLedgerQuery;
+    setActiveTab(scope);
     setActiveQuery(nextQuery);
     setPageCursors([undefined]);
     await onQuery(nextQuery);
@@ -123,7 +130,7 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
     setTenantId(undefined);
     setDateFrom('');
     setDateTo('');
-    const nextQuery = { limit: 200 } satisfies BillingLedgerQuery;
+    const nextQuery = { limit: 200, scope: activeTab } satisfies BillingLedgerQuery;
     setActiveQuery(nextQuery);
     setPageCursors([undefined]);
     await onQuery(nextQuery);
@@ -302,10 +309,10 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
       <Card className="diagnostic-card">
         <Tabs
           activeKey={activeTab}
-          onChange={(value) => setActiveTab(value as 'image' | 'chat')}
+          onChange={(value) => void queryLedger(value as 'image' | 'chat')}
           items={[
-            { key: 'image', label: `图像生成 (${report.image.total})`, children: imageTable },
-            { key: 'chat', label: `聊天 (${report.chat.total})`, children: chatTable },
+            { key: 'image', label: activeTab === 'image' ? `图像生成 (${report.image.total})` : '图像生成', children: imageTable },
+            { key: 'chat', label: activeTab === 'chat' ? `聊天 (${report.chat.total})` : '聊天', children: chatTable },
           ]}
         />
       </Card>

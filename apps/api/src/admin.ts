@@ -766,7 +766,8 @@ const resolutionAuditQuerySchema = z.object({
 });
 
 const billingLedgerQuerySchema = z.object({
-  limit: z.coerce.number().int().positive().max(500).optional(),
+  limit: z.coerce.number().int().positive().max(5000).optional(),
+  scope: z.enum(['image', 'chat']).optional(),
   tenantId: z.string().trim().min(1).optional(),
   apiKeyId: z.string().trim().min(1).optional(),
   createdAfter: z.coerce.number().int().nonnegative().optional(),
@@ -1918,7 +1919,11 @@ export async function registerAdminRoutes(app: FastifyInstance) {
       adminConsoleCatalogStore.refreshAsync(),
       operationalRepository.listBillingLedgerPage({
         limit: query.limit || 200,
-        operations: ['generations', 'edits', 'chat_completions'],
+        operations: query.scope === 'chat'
+          ? ['chat_completions']
+          : query.scope === 'image'
+            ? ['generations', 'edits']
+            : ['generations', 'edits', 'chat_completions'],
         tenantId: query.tenantId,
         apiKeyId: query.apiKeyId,
         createdAfter: query.createdAfter,
