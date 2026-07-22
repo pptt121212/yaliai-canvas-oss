@@ -24,8 +24,9 @@ pnpm --filter @yali/api build
 pnpm --filter @yali/api reset:operational-partitions
 ```
 
-该操作清空请求追踪、计费明细、任务明细和资金账本历史，保留 `tenant_credit_balances`、
-`tenant_finance_balances`、审计日志。账户当前余额不受影响。完成后再启动 API 服务。
+该操作只清空请求追踪、计费明细和任务明细。`tenant_finance_ledger` 是长期财务账本，
+连同 `tenant_credit_balances`、`tenant_finance_balances`、审计日志均会保留。账户当前余额
+不受影响。完成后再启动 API 服务。
 
 ## 验证
 

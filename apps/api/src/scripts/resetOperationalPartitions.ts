@@ -25,10 +25,10 @@ function assertSchema(value: string) {
 /**
  * One-time schema cutover for the new system.
  *
- * This deliberately resets only high-volume operational detail. Tenant balances remain
- * authoritative in tenant_finance_balances and tenant_credit_balances, so a detail reset
- * cannot alter available account funds. Run it before starting the version with partitioned
- * operational tables; it is intentionally not a rolling compatibility migration.
+ * This deliberately resets only disposable high-volume operational detail. The financial
+ * ledger and both balance snapshots are authoritative accounting data and are never reset.
+ * Run it before starting the version with partitioned operational tables; it is intentionally
+ * not a rolling compatibility migration.
  */
 async function main() {
   assertExplicitConfirmation();
@@ -42,11 +42,9 @@ async function main() {
       'request_trace_index',
       'billing_ledger_index',
       'task_master_index',
-      'tenant_finance_ledger_index',
       'request_traces',
       'billing_ledger',
       'task_master',
-      'tenant_finance_ledger',
     ]) {
       await pool.query(`drop table if exists ${schema}.${table} cascade`);
     }
@@ -55,8 +53,14 @@ async function main() {
     console.log(JSON.stringify({
       ok: true,
       schema,
-      reset: ['request_traces', 'billing_ledger', 'task_master', 'tenant_finance_ledger'],
-      preserved: ['tenant_credit_balances', 'tenant_finance_balances', 'audit_logs'],
+      reset: ['request_traces', 'billing_ledger', 'task_master'],
+      preserved: [
+        'tenant_finance_ledger',
+        'tenant_finance_ledger_index',
+        'tenant_credit_balances',
+        'tenant_finance_balances',
+        'audit_logs',
+      ],
     }));
   } catch (error) {
     await pool.query('rollback').catch(() => undefined);
