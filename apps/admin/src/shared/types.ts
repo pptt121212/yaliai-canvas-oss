@@ -495,7 +495,7 @@ export type RoutingDiagnosticsPreviewPlan = {
   modeLabel: string;
   candidateCount: number;
   filteredOutCount: number;
-  filteredOut: Array<{ providerId: string; reason: string }>;
+  filteredOut: Array<{ providerId: string; providerName: string; reason: string }>;
   candidates: Array<{
     rank: number;
     providerId: string;

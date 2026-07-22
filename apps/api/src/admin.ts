@@ -451,7 +451,10 @@ async function buildRoutingDiagnosticsPayload() {
         modeLabel: smartRoutingModeLabel(plan.mode),
         candidateCount: plan.candidates.length,
         filteredOutCount: plan.filteredOut.length,
-        filteredOut: plan.filteredOut,
+        filteredOut: plan.filteredOut.map((item) => ({
+          ...item,
+          providerName: upstreamNameById.get(item.providerId) || item.providerId,
+        })),
         candidates: plan.candidates.map((candidate, index) => ({
           rank: index + 1,
           providerId: candidate.provider.providerId,

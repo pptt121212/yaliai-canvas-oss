@@ -317,15 +317,20 @@ function renderFilteredOutTable(plan: RoutingDiagnosticsPreviewPlan) {
     <Card size="small" title="为什么有些线路没有进入候选" style={{ marginTop: 12 }}>
       <Table
         size="small"
-        rowKey={(row) => `${plan.mode}-${row.providerId}-${row.reason}`}
+        rowKey={(row) => row ? `${plan.mode}-${row.providerId}-${row.reason}` : `${plan.mode}-filtered-out`}
         pagination={false}
         dataSource={plan.filteredOut}
         columns={[
           {
-            title: '线路 ID',
-            dataIndex: 'providerId',
+            title: '线路',
+            dataIndex: 'providerName',
             width: 260,
-            render: (value?: string) => <EllipsisText value={value} />,
+            render: (value?: string, record?: RoutingDiagnosticsPreviewPlan['filteredOut'][number]) => (
+              <Space direction="vertical" size={0}>
+                <EllipsisText value={value || record?.providerId || EMPTY_DASH} />
+                <Text type="secondary" className="tabular">{record?.providerId || EMPTY_DASH}</Text>
+              </Space>
+            ),
           },
           {
             title: '没有参与排序的原因',
