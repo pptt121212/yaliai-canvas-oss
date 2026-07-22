@@ -60,7 +60,7 @@ export function AuditLogsPage({ report }: AuditLogsPageProps) {
     <div className="page-stack">
       <PageHeader
         title="审计日志"
-        desc="这里记录后台关键配置变更和系统级动作，属于操作审计口径，不参与业务成功率、计费和路由健康统计。"
+        desc="这里记录后台关键配置变更和系统级动作，默认展示最近 500 条；页面统计仅针对当前展示窗口，不参与业务成功率、计费和路由健康统计。"
       />
 
       <Alert
@@ -72,7 +72,7 @@ export function AuditLogsPage({ report }: AuditLogsPageProps) {
 
       <StatStrip
         items={[
-          { label: '日志总数', value: report.total },
+          { label: '当前窗口日志', value: report.total },
           { label: '成功', value: report.summary.successCount, muted: report.summary.successCount === 0 },
           { label: '失败', value: report.summary.failedCount, muted: report.summary.failedCount === 0 },
           { label: '已受理', value: report.summary.acceptedCount, muted: report.summary.acceptedCount === 0 },

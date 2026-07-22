@@ -139,15 +139,17 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
   }, [accountByTenantId, catalog]);
 
   const balanceRows = useMemo(() => {
-    return (report?.balances || []).map((item) => ({
+    return (report?.balances || [])
+      .filter((item) => !ledgerTenantId || item.tenantId === ledgerTenantId)
+      .map((item) => ({
       ...item,
       account: accountByTenantId.get(item.tenantId) || {
         username: '未绑定账户',
         email: '—',
         searchText: '',
       },
-    }));
-  }, [accountByTenantId, report]);
+      }));
+  }, [accountByTenantId, ledgerTenantId, report]);
 
   const ledgerRows = useMemo(() => {
     return (report?.rows || []).map((item) => ({
@@ -338,7 +340,7 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
     <div className="page-stack">
       <PageHeader
         title="充值管理"
-        desc="按账户维度管理人民币余额。列表展示完整余额流水，包含手工充值/扣费和系统自动图像消费；新增按钮仅用于手工记账。"
+        desc="按账户维度管理人民币余额。余额卡与当前账户筛选对齐；下方账本按类别、账户和日期独立分页查询，新增按钮仅用于手工记账。"
         actions={<Button type="primary" onClick={openCreate}>新增充值 / 扣费</Button>}
       />
 

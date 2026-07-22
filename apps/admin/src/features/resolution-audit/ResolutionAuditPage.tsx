@@ -65,7 +65,7 @@ export function ResolutionAuditPage({ report }: ResolutionAuditPageProps) {
     <div className="page-stack">
       <PageHeader
         title="分辨率偏差"
-        desc="按「上游 + 操作 + 请求尺寸 + 比例」统计尺寸是否稳定、是否降档、比例是否正确，是智能优选与回退的基础数据。"
+        desc="按「上游 + 操作 + 请求尺寸 + 比例」统计尺寸是否稳定、是否降档、比例是否正确。默认基于最近 1000 个任务样本，任务保留期内的数据是智能优选与回退的基础证据。"
       />
 
       <StatStrip

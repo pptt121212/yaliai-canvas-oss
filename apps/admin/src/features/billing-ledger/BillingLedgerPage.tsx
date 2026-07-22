@@ -300,7 +300,7 @@ export function BillingLedgerPage({ report, catalog, canvasUsersReport, loading,
 
       <StatStrip
         items={[
-          { label: '流水条数', value: rows.length },
+          { label: '当前条件流水条数', value: rows.length },
           { label: '已扣费笔数', value: chargedRows.length },
           { label: '累计实扣', value: formatCredits(totalCharged) },
         ]}

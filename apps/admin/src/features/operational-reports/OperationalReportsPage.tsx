@@ -132,7 +132,7 @@ export function OperationalReportsPage({
     <div className="page-stack">
       <PageHeader
         title="经营报表"
-        desc="面向长期经营分析的离线聚合报表。关闭时不扫描明细、不写入 Rollup，并在保存关闭后清理已生成的报表数据。"
+        desc="面向长期经营分析的离线聚合报表。默认读取最近 30 天、最多 10000 条 Rollup；页面汇总仅基于当前读取范围。关闭时不扫描明细、不写入 Rollup，并在保存关闭后清理已生成的报表数据。"
       />
 
       <Card className="overview-card" title="长期报表 Rollup 开关">

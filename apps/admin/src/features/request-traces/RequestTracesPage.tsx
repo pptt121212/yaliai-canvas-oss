@@ -110,7 +110,7 @@ export function RequestTracesPage({ report, saving = false, onClear }: RequestTr
     <div className="page-stack">
       <PageHeader
         title="请求追踪"
-        desc="这是请求级调试日志。列表先显示轻量摘要，展开某行后才加载完整上下游输入输出；它不直接等同于业务成功率统计。"
+        desc="这是请求级调试日志，默认展示最近 200 条。列表先显示轻量摘要，展开某行后才加载完整上下游输入输出；页面统计仅针对当前窗口，不直接等同于业务成功率统计。"
         actions={
           <Popconfirm
             title="清空请求追踪"
@@ -137,7 +137,7 @@ export function RequestTracesPage({ report, saving = false, onClear }: RequestTr
 
       <StatStrip
         items={[
-          { label: '追踪总数', value: report.total },
+          { label: '当前窗口追踪', value: report.total },
           { label: '仅上游追踪', value: report.summary.upstreamOnlyCount },
           { label: '完整上下游', value: report.summary.fullChainCount },
           { label: '已受理 / 处理中', value: acceptedRows.length, muted: acceptedRows.length === 0 },

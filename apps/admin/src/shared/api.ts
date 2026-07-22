@@ -182,7 +182,7 @@ export async function fetchChannelPerformanceReport(query: ChannelPerformanceQue
 }
 
 export async function fetchOperationalRollupReport(days = 30) {
-  return requestJson<OperationalRollupReport>(`/v1/admin/reports/operational-rollups?days=${encodeURIComponent(String(days))}`, {
+  return requestJson<OperationalRollupReport>(`/v1/admin/reports/operational-rollups?days=${encodeURIComponent(String(days))}&limit=10000`, {
     method: 'GET',
   });
 }
