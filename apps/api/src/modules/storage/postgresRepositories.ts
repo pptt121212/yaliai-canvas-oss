@@ -1411,8 +1411,21 @@ export function createPostgresOperationalRepository(
       );
       return next;
     },
-    async listTraces(limit: number) {
+    async listTraces(input) {
       await ensureOperationalTables(pool, schema);
+      const conditions: string[] = [];
+      const params: number[] = [];
+      if (Number.isFinite(input.createdAfter) && Number(input.createdAfter) > 0) {
+        params.push(Number(input.createdAfter));
+        conditions.push(`created_at >= $${params.length}`);
+      }
+      if (Number.isFinite(input.createdBefore) && Number(input.createdBefore) > 0) {
+        params.push(Number(input.createdBefore));
+        conditions.push(`created_at < $${params.length}`);
+      }
+      const where = conditions.length ? `where ${conditions.join(' and ')}` : '';
+      const limit = Math.max(1, Math.min(1000, Number(input.limit || 200)));
+      params.push(limit);
       let result;
       try {
         result = await pool.query(
@@ -1422,10 +1435,11 @@ export function createPostgresOperationalRepository(
               request_id, task_id, tenant_id, api_key_id, channel_id, upstream_id,
               upstream_name, provider_base_url, operation, failure_category, status_code, tags
             from ${schema}.request_traces
+            ${where}
             order by created_at desc
-            limit $1
+            limit $${params.length}
           `,
-          [limit],
+          params,
         );
       } catch (error) {
         if (!isUndefinedColumnError(error, 'failure_category')) {
@@ -1438,10 +1452,11 @@ export function createPostgresOperationalRepository(
               request_id, task_id, tenant_id, api_key_id, channel_id, upstream_id,
               upstream_name, provider_base_url, operation
             from ${schema}.request_traces
+            ${where}
             order by created_at desc
-            limit $1
+            limit $${params.length}
           `,
-          [limit],
+          params,
         );
       }
       return result.rows.map((row) => ({
@@ -3071,13 +3086,23 @@ export function createPostgresOperationalRepository(
       if (!taskIds.length && !requestIds.length) {
         return [];
       }
+      const conditions = ['(task_id = any($1::text[]) or request_id = any($2::text[]))'];
+      const params: Array<string[] | number> = [taskIds, requestIds];
+      if (Number.isFinite(input.createdAfter) && Number(input.createdAfter) > 0) {
+        params.push(Number(input.createdAfter));
+        conditions.push(`created_at >= $${params.length}`);
+      }
+      if (Number.isFinite(input.createdBefore) && Number(input.createdBefore) > 0) {
+        params.push(Number(input.createdBefore));
+        conditions.push(`created_at < $${params.length}`);
+      }
       const result = await pool.query(
         `
           select task_id, request_id, request_payload
           from ${schema}.task_master
-          where task_id = any($1::text[]) or request_id = any($2::text[])
+          where ${conditions.join(' and ')}
         `,
-        [taskIds, requestIds],
+        params,
       );
       return result.rows.map((row) => ({
         taskId: row.task_id,

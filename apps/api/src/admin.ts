@@ -1937,6 +1937,8 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     const tasks = await operationalRepository.listTasksForBilling({
       taskIds: billingRows.flatMap((row) => row.taskId ? [row.taskId] : []),
       requestIds: billingRows.map((row) => row.requestId),
+      createdAfter: query.createdAfter,
+      createdBefore: query.createdBefore,
     });
     const imageRows = billingRows.filter((row) => row.operation === 'generations' || row.operation === 'edits');
     const chatRows = billingRows.filter((row) => row.operation === 'chat_completions');
@@ -2179,6 +2181,10 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     requireAdmin(request, reply);
     const query = z.object({
       limit: z.coerce.number().int().positive().max(1000).optional(),
+      createdAfter: z.coerce.number().int().nonnegative().optional(),
+      createdBefore: z.coerce.number().int().positive().optional(),
+    }).refine((value) => !value.createdAfter || !value.createdBefore || value.createdBefore > value.createdAfter, {
+      message: 'created_before_must_be_after_created_after',
     }).parse(request.query);
     const catalog = await adminConsoleCatalogStore.refreshAsync();
     const tenantNameById = new Map(catalog.tenants.map((item) => [item.id, item.name]));
@@ -2186,7 +2192,11 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     const upstreamNameById = new Map(catalog.upstreams.map((item) => [item.id, item.name]));
     let rows;
     try {
-      rows = await operationalRepository.listTraces(query.limit || 200);
+      rows = await operationalRepository.listTraces({
+        limit: query.limit || 200,
+        createdAfter: query.createdAfter,
+        createdBefore: query.createdBefore,
+      });
     } catch (error) {
       const message = formatAdminRouteError(error);
       reply.code(500);

@@ -592,7 +592,11 @@ export interface AsyncOperationalRepository {
   appendTrace(record: RequestTraceRecord): Promise<RequestTraceRecord>;
   updateTrace(traceId: string, patch: Partial<RequestTraceRecord>): Promise<RequestTraceRecord | null>;
   getTrace(traceId: string): Promise<RequestTraceRecord | null>;
-  listTraces(limit: number): Promise<RequestTraceRecord[]>;
+  listTraces(input: {
+    limit: number;
+    createdAfter?: number;
+    createdBefore?: number;
+  }): Promise<RequestTraceRecord[]>;
   clearTraces(): Promise<{ deletedCount: number }>;
   createBillingLedger(record: BillingLedgerRecord): Promise<BillingLedgerRecord>;
   updateBillingLedger(id: string, patch: Partial<BillingLedgerRecord>): Promise<BillingLedgerRecord | null>;
@@ -721,7 +725,12 @@ export interface AsyncOperationalRepository {
   upsertTask(record: TaskMasterRecord): Promise<TaskMasterRecord>;
   getTask(taskId: string): Promise<TaskMasterRecord | null>;
   listTasks(limit: number): Promise<TaskMasterRecord[]>;
-  listTasksForBilling(input: { taskIds: string[]; requestIds: string[] }): Promise<TaskMasterRecord[]>;
+  listTasksForBilling(input: {
+    taskIds: string[];
+    requestIds: string[];
+    createdAfter?: number;
+    createdBefore?: number;
+  }): Promise<TaskMasterRecord[]>;
   listTasksForRoutingAccuracy(limit: number): Promise<TaskMasterRecord[]>;
   getRoutingAccuracySnapshot(snapshotKey: string): Promise<RoutingAccuracySnapshotRecord | null>;
   upsertRoutingAccuracySnapshot(record: RoutingAccuracySnapshotRecord): Promise<RoutingAccuracySnapshotRecord>;

@@ -280,7 +280,7 @@ export function AdminApp() {
         setAuditLogReport(report);
         await Promise.all([catalogPromise, controlPlanePromise]);
       } else if (view === 'request-traces') {
-        const report = await fetchRequestTraceReport();
+        const report = await fetchRequestTraceReport({ limit: 200, ...currentLocalDayRange() });
         setRequestTraceReport(report);
         await Promise.all([catalogPromise, controlPlanePromise]);
       } else if (view === 'routing-diagnostics') {

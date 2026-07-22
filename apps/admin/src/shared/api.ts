@@ -187,8 +187,18 @@ export async function fetchOperationalRollupReport(days = 30) {
   });
 }
 
-export async function fetchRequestTraceReport(limit = 200) {
-  return requestJson<RequestTraceReport>(`/v1/admin/reports/request-traces?limit=${encodeURIComponent(String(limit))}`, {
+export type RequestTraceQuery = {
+  limit?: number;
+  createdAfter?: number;
+  createdBefore?: number;
+};
+
+export async function fetchRequestTraceReport(query: RequestTraceQuery = {}) {
+  const params = new URLSearchParams();
+  params.set('limit', String(query.limit || 200));
+  if (query.createdAfter) params.set('createdAfter', String(query.createdAfter));
+  if (query.createdBefore) params.set('createdBefore', String(query.createdBefore));
+  return requestJson<RequestTraceReport>(`/v1/admin/reports/request-traces?${params.toString()}`, {
     method: 'GET',
   });
 }
