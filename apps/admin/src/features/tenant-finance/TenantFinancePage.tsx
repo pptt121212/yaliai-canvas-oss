@@ -92,7 +92,10 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
   const [ledgerTenantId, setLedgerTenantId] = useState<string | undefined>();
   const [ledgerDateFrom, setLedgerDateFrom] = useState('');
   const [ledgerDateTo, setLedgerDateTo] = useState('');
-  const [activeLedgerQuery, setActiveLedgerQuery] = useState<TenantFinanceLedgerQuery>({ limit: 200 });
+  const [activeLedgerQuery, setActiveLedgerQuery] = useState<TenantFinanceLedgerQuery>({
+    limit: 200,
+    entryType: 'account_adjustment',
+  });
   const [pageCursors, setPageCursors] = useState<Array<{ createdAt: number; id: string } | undefined>>([undefined]);
   const [form] = Form.useForm<FinanceFormValues>();
   const selectedTenantId = Form.useWatch('tenantId', form);
@@ -169,12 +172,12 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
     ].filter(Boolean).join(' ').toLowerCase().includes(keyword));
   }, [ledgerAccountKeyword, ledgerRows]);
   const accountLedgerRows = useMemo(
-    () => visibleLedgerRows.filter((item) => item.entryType === 'account_adjustment'),
-    [visibleLedgerRows],
+    () => ledgerScope === 'account_adjustment' ? visibleLedgerRows : [],
+    [ledgerScope, visibleLedgerRows],
   );
   const tenantRequestChargeRows = useMemo(
-    () => visibleLedgerRows.filter((item) => item.entryType === 'tenant_request_charge'),
-    [visibleLedgerRows],
+    () => ledgerScope === 'tenant_request_charge' ? visibleLedgerRows : [],
+    [ledgerScope, visibleLedgerRows],
   );
 
   const searchedTenantOptions = useMemo(() => {
@@ -233,15 +236,17 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
     form.setFieldValue('tenantId', tenantId);
   }
 
-  const buildLedgerQuery = (): TenantFinanceLedgerQuery => ({
+  const buildLedgerQuery = (entryType = ledgerScope): TenantFinanceLedgerQuery => ({
     limit: 200,
     tenantId: ledgerTenantId,
+    entryType,
     createdAfter: ledgerDateFrom ? new Date(`${ledgerDateFrom}T00:00:00`).getTime() : undefined,
     createdBefore: ledgerDateTo ? new Date(`${ledgerDateTo}T00:00:00`).getTime() + 24 * 60 * 60 * 1000 : undefined,
   });
 
-  const queryLedger = async () => {
-    const nextQuery = buildLedgerQuery();
+  const queryLedger = async (entryType = ledgerScope) => {
+    const nextQuery = buildLedgerQuery(entryType);
+    setLedgerScope(entryType);
     setActiveLedgerQuery(nextQuery);
     setPageCursors([undefined]);
     await onQuery(nextQuery);
@@ -261,7 +266,7 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
     setLedgerDateFrom('');
     setLedgerDateTo('');
     setLedgerAccountKeyword('');
-    const nextQuery = { limit: 200 } satisfies TenantFinanceLedgerQuery;
+    const nextQuery = { limit: 200, entryType: ledgerScope } satisfies TenantFinanceLedgerQuery;
     setActiveLedgerQuery(nextQuery);
     setPageCursors([undefined]);
     await onQuery(nextQuery);
@@ -403,7 +408,7 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
         ) : null}
         <Tabs
           activeKey={ledgerScope}
-          onChange={(key) => setLedgerScope(key as 'account_adjustment' | 'tenant_request_charge')}
+          onChange={(key) => void queryLedger(key as 'account_adjustment' | 'tenant_request_charge')}
           items={[
             {
               key: 'account_adjustment',
