@@ -781,7 +781,7 @@ const billingLedgerQuerySchema = z.object({
 });
 
 const tenantFinanceLedgerQuerySchema = z.object({
-  limit: z.coerce.number().int().positive().max(500).optional(),
+  limit: z.coerce.number().int().positive().max(5000).optional(),
   tenantId: z.string().trim().min(1).optional(),
   direction: z.enum(['credit', 'debit']).optional(),
   entryType: z.enum(['account_adjustment', 'tenant_request_charge']).optional(),

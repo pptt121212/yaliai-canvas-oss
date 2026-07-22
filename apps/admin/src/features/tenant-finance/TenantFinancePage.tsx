@@ -6,12 +6,14 @@ import { DrawerFooter, PageHeader, StatusDot, formatCredits, formatDateTime } fr
 
 const { Paragraph, Text } = Typography;
 
+type FinanceEntryScope = 'account_adjustment' | 'tenant_request_charge';
+type TenantFinanceReports = Record<FinanceEntryScope, TenantFinanceLedgerReport | null>;
+
 type TenantFinancePageProps = {
   catalog: AdminConsoleCatalog | null;
-  report: TenantFinanceLedgerReport | null;
+  reports: TenantFinanceReports;
   canvasUsersReport: CanvasUserAdminReport | null;
   saving: boolean;
-  loading: boolean;
   onQuery: (query: TenantFinanceLedgerQuery) => Promise<void>;
   onAdjust: (input: {
     tenantId: string;
@@ -83,20 +85,21 @@ function pickPrimaryAccount(users: CanvasUserAdminReport['rows'] = []): AccountI
   };
 }
 
-export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, loading, onQuery, onAdjust }: TenantFinancePageProps) {
+export function TenantFinancePage({ catalog, reports, canvasUsersReport, saving, onQuery, onAdjust }: TenantFinancePageProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [searchDraft, setSearchDraft] = useState('');
   const [searchKeyword, setSearchKeyword] = useState('');
   const [ledgerAccountKeyword, setLedgerAccountKeyword] = useState('');
-  const [ledgerScope, setLedgerScope] = useState<'account_adjustment' | 'tenant_request_charge'>('account_adjustment');
+  const [ledgerScope, setLedgerScope] = useState<FinanceEntryScope>('account_adjustment');
   const [ledgerTenantId, setLedgerTenantId] = useState<string | undefined>();
   const [ledgerDateFrom, setLedgerDateFrom] = useState('');
   const [ledgerDateTo, setLedgerDateTo] = useState('');
-  const [activeLedgerQuery, setActiveLedgerQuery] = useState<TenantFinanceLedgerQuery>({
-    limit: 200,
-    entryType: 'account_adjustment',
+  const [activeLedgerQuery, setActiveLedgerQuery] = useState<TenantFinanceLedgerQuery>({ limit: 200 });
+  const [ledgerLoading, setLedgerLoading] = useState(false);
+  const [pageCursorsByScope, setPageCursorsByScope] = useState<Record<FinanceEntryScope, Array<{ createdAt: number; id: string } | undefined>>>({
+    account_adjustment: [undefined],
+    tenant_request_charge: [undefined],
   });
-  const [pageCursors, setPageCursors] = useState<Array<{ createdAt: number; id: string } | undefined>>([undefined]);
   const [form] = Form.useForm<FinanceFormValues>();
   const selectedTenantId = Form.useWatch('tenantId', form);
 
@@ -139,7 +142,7 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
   }, [accountByTenantId, catalog]);
 
   const balanceRows = useMemo(() => {
-    return (report?.balances || [])
+    return (reports[ledgerScope]?.balances || [])
       .filter((item) => !ledgerTenantId || item.tenantId === ledgerTenantId)
       .map((item) => ({
       ...item,
@@ -149,10 +152,10 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
         searchText: '',
       },
       }));
-  }, [accountByTenantId, ledgerTenantId, report]);
+  }, [accountByTenantId, ledgerScope, ledgerTenantId, reports]);
 
   const ledgerRows = useMemo(() => {
-    return (report?.rows || []).map((item) => ({
+    return (reports[ledgerScope]?.rows || []).map((item) => ({
       ...item,
       account: accountByTenantId.get(item.tenantId) || {
         username: '未绑定账户',
@@ -160,7 +163,7 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
         searchText: '',
       },
     }));
-  }, [accountByTenantId, report]);
+  }, [accountByTenantId, ledgerScope, reports]);
 
   const visibleLedgerRows = useMemo(() => {
     const keyword = ledgerAccountKeyword.trim().toLowerCase();
@@ -173,14 +176,8 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
       item.operatorLabel,
     ].filter(Boolean).join(' ').toLowerCase().includes(keyword));
   }, [ledgerAccountKeyword, ledgerRows]);
-  const accountLedgerRows = useMemo(
-    () => ledgerScope === 'account_adjustment' ? visibleLedgerRows : [],
-    [ledgerScope, visibleLedgerRows],
-  );
-  const tenantRequestChargeRows = useMemo(
-    () => ledgerScope === 'tenant_request_charge' ? visibleLedgerRows : [],
-    [ledgerScope, visibleLedgerRows],
-  );
+  const accountLedgerRows = ledgerScope === 'account_adjustment' ? visibleLedgerRows : [];
+  const tenantRequestChargeRows = ledgerScope === 'tenant_request_charge' ? visibleLedgerRows : [];
 
   const searchedTenantOptions = useMemo(() => {
     const keyword = String(searchKeyword || '').trim().toLowerCase();
@@ -238,29 +235,54 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
     form.setFieldValue('tenantId', tenantId);
   }
 
-  const buildLedgerQuery = (entryType = ledgerScope): TenantFinanceLedgerQuery => ({
-    limit: 200,
-    tenantId: ledgerTenantId,
+  const buildLedgerQuery = (
+    entryType: FinanceEntryScope,
+    filter: Pick<TenantFinanceLedgerQuery, 'tenantId' | 'createdAfter' | 'createdBefore'> = {
+      tenantId: ledgerTenantId,
+      createdAfter: ledgerDateFrom ? new Date(`${ledgerDateFrom}T00:00:00`).getTime() : undefined,
+      createdBefore: ledgerDateTo ? new Date(`${ledgerDateTo}T00:00:00`).getTime() + 24 * 60 * 60 * 1000 : undefined,
+    },
+  ): TenantFinanceLedgerQuery => ({
+    ...filter,
+    limit: filter.tenantId || (filter.createdAfter && filter.createdBefore) ? 5000 : 200,
     entryType,
-    createdAfter: ledgerDateFrom ? new Date(`${ledgerDateFrom}T00:00:00`).getTime() : undefined,
-    createdBefore: ledgerDateTo ? new Date(`${ledgerDateTo}T00:00:00`).getTime() + 24 * 60 * 60 * 1000 : undefined,
   });
 
-  const queryLedger = async (entryType = ledgerScope) => {
-    const nextQuery = buildLedgerQuery(entryType);
-    setLedgerScope(entryType);
-    setActiveLedgerQuery(nextQuery);
-    setPageCursors([undefined]);
-    await onQuery(nextQuery);
+  const refreshAllLedgerScopes = async (
+    filter?: Pick<TenantFinanceLedgerQuery, 'tenantId' | 'createdAfter' | 'createdBefore'>,
+  ) => {
+    const adjustmentQuery = buildLedgerQuery('account_adjustment', filter);
+    const requestChargeQuery = buildLedgerQuery('tenant_request_charge', filter);
+    setLedgerLoading(true);
+    setActiveLedgerQuery(adjustmentQuery);
+    setPageCursorsByScope({
+      account_adjustment: [undefined],
+      tenant_request_charge: [undefined],
+    });
+    try {
+      await Promise.all([onQuery(adjustmentQuery), onQuery(requestChargeQuery)]);
+    } finally {
+      setLedgerLoading(false);
+    }
+  };
+
+  const queryLedger = async () => {
+    await refreshAllLedgerScopes();
   };
 
   const loadLedgerPage = async (cursor: { createdAt: number; id: string } | undefined, cursors: Array<{ createdAt: number; id: string } | undefined>) => {
-    setPageCursors(cursors);
-    await onQuery({
-      ...activeLedgerQuery,
-      cursorCreatedAt: cursor?.createdAt,
-      cursorId: cursor?.id,
-    });
+    setLedgerLoading(true);
+    setPageCursorsByScope((current) => ({ ...current, [ledgerScope]: cursors }));
+    try {
+      await onQuery({
+        ...activeLedgerQuery,
+        entryType: ledgerScope,
+        cursorCreatedAt: cursor?.createdAt,
+        cursorId: cursor?.id,
+      });
+    } finally {
+      setLedgerLoading(false);
+    }
   };
 
   const resetLedgerQuery = async () => {
@@ -268,11 +290,13 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
     setLedgerDateFrom('');
     setLedgerDateTo('');
     setLedgerAccountKeyword('');
-    const nextQuery = { limit: 200, entryType: ledgerScope } satisfies TenantFinanceLedgerQuery;
-    setActiveLedgerQuery(nextQuery);
-    setPageCursors([undefined]);
-    await onQuery(nextQuery);
+    await refreshAllLedgerScopes({});
   };
+
+  const report = reports[ledgerScope];
+  const pageCursors = pageCursorsByScope[ledgerScope];
+  const adjustmentCount = reports.account_adjustment?.total || 0;
+  const requestChargeCount = reports.tenant_request_charge?.total || 0;
 
   const selectedAccount = searchedTenantOptions.find((item) => item.value === selectedTenantId) || null;
 
@@ -376,8 +400,8 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
           />
           <Input type="date" value={ledgerDateFrom} onChange={(event) => setLedgerDateFrom(event.target.value)} />
           <Input type="date" value={ledgerDateTo} onChange={(event) => setLedgerDateTo(event.target.value)} />
-          <Button type="primary" loading={loading} onClick={() => void queryLedger()}>查询</Button>
-          <Button disabled={loading} onClick={() => void resetLedgerQuery()}>重置</Button>
+          <Button type="primary" loading={ledgerLoading} onClick={() => void queryLedger()}>查询</Button>
+          <Button disabled={ledgerLoading} onClick={() => void resetLedgerQuery()}>重置</Button>
         </Space>
         <Input.Search
           allowClear
@@ -390,36 +414,36 @@ export function TenantFinancePage({ catalog, report, canvasUsersReport, saving, 
           <Space wrap style={{ marginBottom: 16 }}>
             <Text type="secondary">当前第 {pageCursors.length} 页，每页 {report.page.limit} 条。</Text>
             <Button
-              disabled={loading || pageCursors.length <= 1}
+              disabled={ledgerLoading || pageCursors.length <= 1}
               onClick={() => void loadLedgerPage(pageCursors[pageCursors.length - 2], pageCursors.slice(0, -1))}
             >
               上一页
             </Button>
             <Button
-              disabled={loading || !report.page.hasMore || !report.page.nextCursor}
+              disabled={ledgerLoading || !report?.page.hasMore || !report?.page.nextCursor}
               onClick={() => {
-                const nextCursor = report.page.nextCursor;
+                const nextCursor = report?.page.nextCursor;
                 if (!nextCursor) return;
                 void loadLedgerPage(nextCursor, [...pageCursors, nextCursor]);
               }}
             >
               下一页
             </Button>
-            {report.page.hasMore ? <Text type="secondary">仍有更早的匹配账本。</Text> : <Text type="secondary">已到达该条件下的最早账本。</Text>}
+            {report?.page.hasMore ? <Text type="secondary">仍有更早的匹配账本。</Text> : <Text type="secondary">已到达该条件下的最早账本。</Text>}
           </Space>
         ) : null}
         <Tabs
           activeKey={ledgerScope}
-          onChange={(key) => void queryLedger(key as 'account_adjustment' | 'tenant_request_charge')}
+          onChange={(key) => setLedgerScope(key as FinanceEntryScope)}
           items={[
             {
               key: 'account_adjustment',
-              label: `账户充值 / 人工扣费 (${accountLedgerRows.length})`,
+              label: `账户充值 / 人工扣费 (${adjustmentCount})`,
               children: renderLedgerTable(accountLedgerRows),
             },
             {
               key: 'tenant_request_charge',
-              label: `租户 API 请求扣费 (${tenantRequestChargeRows.length})`,
+              label: `租户 API 请求扣费 (${requestChargeCount})`,
               children: renderLedgerTable(tenantRequestChargeRows),
             },
           ]}

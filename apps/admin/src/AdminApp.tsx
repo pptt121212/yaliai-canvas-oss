@@ -98,6 +98,14 @@ type ViewKey =
   | 'docs-images'
   | 'docs-chat';
 
+type TenantFinanceEntryScope = 'account_adjustment' | 'tenant_request_charge';
+type TenantFinanceReports = Record<TenantFinanceEntryScope, TenantFinanceLedgerReport | null>;
+
+const emptyTenantFinanceReports: TenantFinanceReports = {
+  account_adjustment: null,
+  tenant_request_charge: null,
+};
+
 const menuItems = [
   { key: 'overview', icon: <ApartmentOutlined />, label: '总览' },
   { key: 'upstreams', icon: <LinkOutlined />, label: '上游接入' },
@@ -187,7 +195,6 @@ export function AdminApp() {
   const [session, setSession] = useState<AdminSession | null>(null);
   const [bootLoading, setBootLoading] = useState(true);
   const [pageLoading, setPageLoading] = useState(false);
-  const [tenantFinanceQueryLoading, setTenantFinanceQueryLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [activeView, setActiveView] = useState<ViewKey>('overview');
@@ -199,7 +206,7 @@ export function AdminApp() {
   const [requestTraceReport, setRequestTraceReport] = useState<RequestTraceReport | null>(null);
   const [routingDiagnosticsReport, setRoutingDiagnosticsReport] = useState<RoutingDiagnosticsReport | null>(null);
   const [resolutionAuditReport, setResolutionAuditReport] = useState<ResolutionAuditReport | null>(null);
-  const [tenantFinanceReport, setTenantFinanceReport] = useState<TenantFinanceLedgerReport | null>(null);
+  const [tenantFinanceReports, setTenantFinanceReports] = useState<TenantFinanceReports>(emptyTenantFinanceReports);
   const [canvasUsersReport, setCanvasUsersReport] = useState<CanvasUserAdminReport | null>(null);
   const [controlPlane, setControlPlane] = useState<AdminControlPlaneConfig | null>(null);
 
@@ -271,11 +278,15 @@ export function AdminApp() {
         setResolutionAuditReport(report);
         await Promise.all([catalogPromise, controlPlanePromise]);
       } else if (view === 'tenant-finance') {
-        const [report, canvasReport] = await Promise.all([
-          fetchTenantFinanceLedgerReport({ limit: 200 }),
+        const [adjustmentReport, requestChargeReport, canvasReport] = await Promise.all([
+          fetchTenantFinanceLedgerReport({ limit: 200, entryType: 'account_adjustment' }),
+          fetchTenantFinanceLedgerReport({ limit: 200, entryType: 'tenant_request_charge' }),
           fetchCanvasUsersReport(),
         ]);
-        setTenantFinanceReport(report);
+        setTenantFinanceReports({
+          account_adjustment: adjustmentReport,
+          tenant_request_charge: requestChargeReport,
+        });
         setCanvasUsersReport(canvasReport);
         await Promise.all([catalogPromise, controlPlanePromise]);
       } else if (view === 'tenants') {
@@ -322,7 +333,7 @@ export function AdminApp() {
       setRequestTraceReport(null);
       setRoutingDiagnosticsReport(null);
       setResolutionAuditReport(null);
-      setTenantFinanceReport(null);
+      setTenantFinanceReports(emptyTenantFinanceReports);
       setCanvasUsersReport(null);
       setControlPlane(null);
     } finally {
@@ -428,17 +439,19 @@ export function AdminApp() {
       return (
         <TenantFinancePage
           catalog={catalog}
-          report={tenantFinanceReport}
+          reports={tenantFinanceReports}
           canvasUsersReport={canvasUsersReport}
           saving={saving}
-          loading={tenantFinanceQueryLoading}
           onQuery={async (query) => {
-            setTenantFinanceQueryLoading(true);
-            try {
-              setTenantFinanceReport(await fetchTenantFinanceLedgerReport(query));
-            } finally {
-              setTenantFinanceQueryLoading(false);
+            const scope = query.entryType;
+            if (!scope) {
+              throw new Error('tenant_finance_entry_type_required');
             }
+            const report = await fetchTenantFinanceLedgerReport(query);
+            setTenantFinanceReports((current) => ({
+              ...current,
+              [scope]: report,
+            }));
           }}
           onAdjust={(input) => wrapSave(
             () => adjustTenantFinanceBalance(input),
@@ -526,8 +539,7 @@ export function AdminApp() {
     routingDiagnosticsReport,
     resolutionAuditReport,
     saving,
-    tenantFinanceReport,
-    tenantFinanceQueryLoading,
+    tenantFinanceReports,
     canvasUsersReport,
     controlPlane,
   ]);

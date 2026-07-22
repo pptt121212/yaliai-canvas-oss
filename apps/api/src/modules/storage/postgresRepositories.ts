@@ -1660,7 +1660,7 @@ export function createPostgresOperationalRepository(
         params.push(input.cursor.createdAt, input.cursor.id);
         conditions.push(`(created_at < $${params.length - 1} or (created_at = $${params.length - 1} and id < $${params.length}))`);
       }
-      const limit = Math.max(1, Math.min(500, Number(input.limit || 100)));
+      const limit = Math.max(1, Math.min(5_000, Number(input.limit || 100)));
       params.push(limit + 1);
       const where = conditions.length ? `where ${conditions.join(' and ')}` : '';
       const result = await pool.query(
