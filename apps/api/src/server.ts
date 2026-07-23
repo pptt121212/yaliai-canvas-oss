@@ -3597,6 +3597,18 @@ function createRuntimeTaskId(prefix: string) {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function readRuntimeTaskCreatedAtFromId(taskId: string) {
+  const match = String(taskId || '').trim().match(/^[a-z]+_([0-9a-z]+)_/i);
+  if (!match) {
+    return 0;
+  }
+  const timestamp = Number.parseInt(match[1], 36);
+  if (!Number.isFinite(timestamp) || timestamp < 1_500_000_000_000 || timestamp > Date.now() + 60_000) {
+    return 0;
+  }
+  return timestamp;
+}
+
 function summarizeTrace(operation: 'generations' | 'edits', statusCode?: number, ok?: boolean) {
   return `${operation} ${ok ? 'success' : 'failed'}${statusCode ? ` HTTP ${statusCode}` : ''}`.trim();
 }
@@ -3611,6 +3623,18 @@ function isTaskExpired(task: { updated_at?: number; created_at?: number }) {
     return true;
   }
   return Date.now() - lastTouchedAt > effectiveImageTaskQueryTtlSeconds() * 1000;
+}
+
+function isRuntimeTaskIdExpired(taskId: string) {
+  const createdAt = readRuntimeTaskCreatedAtFromId(taskId);
+  return Boolean(createdAt && Date.now() - createdAt > effectiveImageTaskQueryTtlSeconds() * 1000);
+}
+
+function imageTaskExpiredPayload(message: string) {
+  return {
+    error: 'task_expired',
+    message,
+  };
 }
 
 function imageTaskStateFromTaskRecord(record: TaskMasterRecord | null): ImageGatewayTaskState | null {
@@ -9057,13 +9081,19 @@ app.post('/v1/images/edits', { bodyLimit: imageRouteBodyLimitBytes }, async (req
 app.get('/v1/images/generations/:taskId', async (request, reply) => {
   const params = z.object({ taskId: z.string().min(1) }).parse(request.params);
   const task = await getImageTaskState(params.taskId);
-  if (!task || task.operation !== 'generations') {
+  if (!task) {
+    reply.code(404);
+    return isRuntimeTaskIdExpired(params.taskId)
+      ? imageTaskExpiredPayload('Image generation task query window expired.')
+      : { error: 'task_not_found', message: 'Image generation task not found.' };
+  }
+  if (task.operation !== 'generations') {
     reply.code(404);
     return { error: 'task_not_found', message: 'Image generation task not found.' };
   }
   if (isTaskExpired(task)) {
     reply.code(404);
-    return { error: 'task_expired', message: 'Image generation task query window expired.' };
+    return imageTaskExpiredPayload('Image generation task query window expired.');
   }
   return buildImageTaskQueryResponse(request, task);
 });
@@ -9071,13 +9101,19 @@ app.get('/v1/images/generations/:taskId', async (request, reply) => {
 app.get('/v1/images/edits/:taskId', async (request, reply) => {
   const params = z.object({ taskId: z.string().min(1) }).parse(request.params);
   const task = await getImageTaskState(params.taskId);
-  if (!task || task.operation !== 'edits') {
+  if (!task) {
+    reply.code(404);
+    return isRuntimeTaskIdExpired(params.taskId)
+      ? imageTaskExpiredPayload('Image edit task query window expired.')
+      : { error: 'task_not_found', message: 'Image edit task not found.' };
+  }
+  if (task.operation !== 'edits') {
     reply.code(404);
     return { error: 'task_not_found', message: 'Image edit task not found.' };
   }
   if (isTaskExpired(task)) {
     reply.code(404);
-    return { error: 'task_expired', message: 'Image edit task query window expired.' };
+    return imageTaskExpiredPayload('Image edit task query window expired.');
   }
   return buildImageTaskQueryResponse(request, task);
 });
@@ -9087,11 +9123,13 @@ app.get('/v1/image/tasks/:taskId', async (request, reply) => {
   const task = await getImageTaskState(params.taskId);
   if (!task) {
     reply.code(404);
-    return { error: 'task_not_found', message: 'Image task not found.' };
+    return isRuntimeTaskIdExpired(params.taskId)
+      ? imageTaskExpiredPayload('Image task query window expired.')
+      : { error: 'task_not_found', message: 'Image task not found.' };
   }
   if (isTaskExpired(task)) {
     reply.code(404);
-    return { error: 'task_expired', message: 'Image task query window expired.' };
+    return imageTaskExpiredPayload('Image task query window expired.');
   }
   return buildImageTaskQueryResponse(request, task);
 });
