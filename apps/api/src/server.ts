@@ -51,6 +51,7 @@ import {
   appendAuditRecord,
   appendRequestTrace,
   applyBillingChargePersistenceBundle,
+  updateRequestTrace,
   upsertTaskRecord,
 } from './modules/storage/operationalService.js';
 import { operationalRepository } from './modules/storage/operationalStore.js';
@@ -5040,6 +5041,28 @@ async function inspectAsyncQueueState(accessContext: RequestAccessContext) {
   };
 }
 
+async function finalizeAsyncSubmissionTrace(completion: Parameters<typeof appendRequestTrace>[0]) {
+  const taskId = String(completion.taskId || completion.requestId || '').trim();
+  if (!taskId) {
+    await appendRequestTrace(completion);
+    return;
+  }
+  const traceId = `trace_${taskId}_submit`;
+  const updated = await updateRequestTrace(traceId, {
+    ...completion,
+    traceId,
+    source: 'tenant_runtime_async_submit',
+    tags: ['runtime', 'async', 'submit', 'completion'],
+  });
+  if (!updated) {
+    await appendRequestTrace({
+      ...completion,
+      traceId,
+      tags: ['runtime', 'async', 'completion'],
+    });
+  }
+}
+
 async function failQueuedImageTask(input: {
   task: ImageGatewayTaskState;
   requestHeaders: Record<string, string>;
@@ -5082,7 +5105,7 @@ async function failQueuedImageTask(input: {
     },
     errorPayload: input.errorPayload,
   });
-  void appendRequestTrace({
+  void finalizeAsyncSubmissionTrace({
     source: 'tenant_runtime_async_complete',
     scope: 'full_chain',
     status: 'failed',
@@ -6146,7 +6169,6 @@ async function buildSmartExecutionPreview(input: {
   });
 
   const selected = shouldStopAfterFirstProviderAttempt(mode)
-    || payload.async
     ? plan.candidates.slice(0, 1)
     : plan.candidates;
 
@@ -6177,8 +6199,8 @@ async function buildSmartExecutionPreview(input: {
     candidates,
   });
 
-  // Async tasks persist only the selected route. Preparing fallbacks here used
-  // to transform/download reference images that this task could never send.
+  // Queue metadata needs the initial route, while fallback candidates remain
+  // lazy so their reference images are only prepared if they are attempted.
   if (payload.async && candidates[0]) {
     try {
       await prepareRoutedImageExecutionCandidate(candidates[0]);
@@ -7595,7 +7617,7 @@ async function runImageGatewayTask(
       };
       task.updated_at = Date.now();
       await setImageTaskState(taskId, task, imageTaskTtlSeconds);
-      void appendRequestTrace({
+      void finalizeAsyncSubmissionTrace({
         source: 'tenant_runtime_async_complete',
         scope: 'full_chain',
         status: 'failed',
@@ -7762,7 +7784,7 @@ async function runImageGatewayTask(
         : null,
       tags: ['runtime', 'async', 'completion'],
     };
-    void appendRequestTrace(
+    void finalizeAsyncSubmissionTrace(
       result.response.ok
         ? compactSuccessfulImagePayloadForStorage(completionTracePayload) as Parameters<typeof appendRequestTrace>[0]
         : completionTracePayload,
@@ -7814,7 +7836,7 @@ async function runImageGatewayTask(
       },
       errorPayload: { message: task.error },
     });
-    void appendRequestTrace({
+    void finalizeAsyncSubmissionTrace({
       source: 'tenant_runtime_async_complete',
       scope: 'full_chain',
       status: 'failed',
