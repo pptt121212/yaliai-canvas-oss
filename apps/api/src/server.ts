@@ -120,7 +120,8 @@ requireSharedHotState('api_server');
 const port = Number(process.env.PORT || 4010);
 const host = process.env.HOST || '0.0.0.0';
 const gracefulShutdownTimeoutMs = Math.max(30_000, Number(process.env.GRACEFUL_SHUTDOWN_TIMEOUT_MS || 11 * 60_000));
-const configuredImageTaskTtlSeconds = Math.max(
+const imageTaskHotTtlSeconds = 60 * 15;
+const configuredImageTaskQueryTtlSeconds = Math.max(
   60 * 15,
   Math.floor(Number(process.env.ASYNC_IMAGE_TASK_TTL_SECONDS || 60 * 720)),
 );
@@ -483,7 +484,7 @@ async function cleanupStaleMultipartInputSpools() {
 
 async function cleanupStaleAsyncTaskAssets() {
   await fs.mkdir(asyncTaskAssetRoot, { recursive: true });
-  const cutoff = Date.now() - effectiveImageTaskTtlSeconds() * 1000;
+  const cutoff = Date.now() - imageTaskHotTtlSeconds * 1000;
   const entries = await fs.readdir(asyncTaskAssetRoot, { withFileTypes: true });
   await Promise.all(entries.filter((entry) => entry.isDirectory()).map(async (entry) => {
     const directory = path.join(asyncTaskAssetRoot, entry.name);
@@ -3600,8 +3601,8 @@ function summarizeTrace(operation: 'generations' | 'edits', statusCode?: number,
   return `${operation} ${ok ? 'success' : 'failed'}${statusCode ? ` HTTP ${statusCode}` : ''}`.trim();
 }
 
-function effectiveImageTaskTtlSeconds() {
-  return Math.max(configuredImageTaskTtlSeconds, Math.ceil(effectiveGeneratedImageRetentionMs() / 1000));
+function effectiveImageTaskQueryTtlSeconds() {
+  return Math.max(configuredImageTaskQueryTtlSeconds, Math.ceil(effectiveGeneratedImageRetentionMs() / 1000));
 }
 
 function isTaskExpired(task: { updated_at?: number; created_at?: number }) {
@@ -3609,7 +3610,7 @@ function isTaskExpired(task: { updated_at?: number; created_at?: number }) {
   if (!lastTouchedAt) {
     return true;
   }
-  return Date.now() - lastTouchedAt > effectiveImageTaskTtlSeconds() * 1000;
+  return Date.now() - lastTouchedAt > effectiveImageTaskQueryTtlSeconds() * 1000;
 }
 
 function imageTaskStateFromTaskRecord(record: TaskMasterRecord | null): ImageGatewayTaskState | null {
@@ -3644,7 +3645,7 @@ async function getImageTaskState(taskId: string) {
     try {
       const remote = await asyncHotStateStore.getImageTask(taskId);
       if (remote) {
-        hotStateStore.setImageTask(taskId, remote, effectiveImageTaskTtlSeconds());
+        hotStateStore.setImageTask(taskId, remote, imageTaskHotTtlSeconds);
         return remote;
       }
     } catch (error) {
@@ -3661,7 +3662,7 @@ async function getImageTaskState(taskId: string) {
   try {
     const recovered = imageTaskStateFromTaskRecord(await operationalRepository.getTask(taskId));
     if (recovered) {
-      await setImageTaskState(taskId, recovered, effectiveImageTaskTtlSeconds());
+      await setImageTaskState(taskId, recovered, imageTaskHotTtlSeconds);
     }
     return recovered;
   } catch (error) {
@@ -3670,7 +3671,7 @@ async function getImageTaskState(taskId: string) {
   }
 }
 
-async function setImageTaskState(taskId: string, task: ImageGatewayTaskState, ttlSeconds = effectiveImageTaskTtlSeconds()) {
+async function setImageTaskState(taskId: string, task: ImageGatewayTaskState, ttlSeconds = imageTaskHotTtlSeconds) {
   hotStateStore.setImageTask(taskId, task, ttlSeconds);
   if (!asyncHotStateStore) {
     return;
@@ -5123,7 +5124,7 @@ async function failQueuedImageTask(input: {
   input.task.status = 'failed';
   input.task.error = input.errorPayload;
   input.task.updated_at = Date.now();
-  await setImageTaskState(input.task.task_id, input.task, effectiveImageTaskTtlSeconds());
+  await setImageTaskState(input.task.task_id, input.task, imageTaskHotTtlSeconds);
   void upsertTaskRecord({
     taskId: input.task.task_id,
     requestId: input.task.task_id,
@@ -6934,6 +6935,68 @@ function compactSuccessfulImagePayloadForStorage(value: unknown, key = ''): unkn
   );
 }
 
+async function buildRecoverableImageResponsePayloadForStorage(input: {
+  request?: any;
+  taskId: string;
+  responsePayload: Record<string, unknown> | null;
+}) {
+  const responsePayload = input.responsePayload;
+  if (!responsePayload || typeof responsePayload !== 'object' || Array.isArray(responsePayload)) {
+    return responsePayload;
+  }
+  const requestMeta = responsePayload.requestMeta && typeof responsePayload.requestMeta === 'object' && !Array.isArray(responsePayload.requestMeta)
+    ? responsePayload.requestMeta as Record<string, unknown>
+    : {};
+  const body = responsePayload.body && typeof responsePayload.body === 'object' && !Array.isArray(responsePayload.body)
+    ? responsePayload.body as Record<string, unknown>
+    : null;
+  if (requestMeta.responseFormat !== 'b64_json' || !body || !Array.isArray(body.data)) {
+    return responsePayload;
+  }
+
+  const data = await Promise.all(body.data.map(async (item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return item;
+    }
+    const record = { ...item as Record<string, unknown> };
+    if (typeof record.url === 'string' && record.url.trim()) {
+      delete record.b64_json;
+      return record;
+    }
+    const base64 = typeof record.b64_json === 'string' ? record.b64_json.trim() : '';
+    if (!base64 || base64.startsWith('<image payload omitted:')) {
+      return record;
+    }
+    const extension = detectImageExtension({
+      result: base64,
+      outputFormat: typeof body.output_format === 'string' ? body.output_format : undefined,
+    });
+    record.url = await persistGeneratedImageAndBuildUrl({
+      request: input.request,
+      taskId: input.taskId,
+      imageIndex: index,
+      base64,
+      extension,
+    });
+    delete record.b64_json;
+    return record;
+  }));
+
+  return {
+    ...responsePayload,
+    body: {
+      ...body,
+      data,
+    },
+    requestMeta: {
+      ...requestMeta,
+      responseFormat: 'b64_json',
+      storedResponseFormat: 'url',
+      recoverableFromUrl: true,
+    },
+  };
+}
+
 async function buildImageTaskQueryResponse(request: any, task: ImageGatewayTaskState) {
   const sharedTasks = task.status === 'queued' ? await listQueuedImageTasks() : [];
   const queuePosition = task.status === 'queued'
@@ -7347,7 +7410,14 @@ async function buildImageGatewayPersistenceOutboxPayload(input: PersistImageGate
         responseFormatOverride: input.responseFormatOverride,
         allowDirectPublicImageUrl: input.allowDirectPublicImageUrl,
       });
-  const storedResponsePayload = compactSuccessfulImagePayloadForStorage(responsePayload) as Record<string, unknown> | null;
+  const recoverableResponsePayload = input.status === 'completed'
+    ? await buildRecoverableImageResponsePayloadForStorage({
+        request: input.request,
+        taskId: input.taskId,
+        responsePayload,
+      })
+    : responsePayload;
+  const storedResponsePayload = compactSuccessfulImagePayloadForStorage(recoverableResponsePayload) as Record<string, unknown> | null;
   const storedPayload = compactSuccessfulImagePayloadForStorage(input.payload) as z.infer<typeof openAIImagesSchema>;
 
   return {
@@ -7580,7 +7650,7 @@ async function createImageGatewayTask(input: {
       imageAssets: persistedAssets.imageAssets,
     });
     // Keep the admission reservation until this task is visible to every PM2 worker.
-    await setImageTaskState(taskId, record, effectiveImageTaskTtlSeconds());
+    await setImageTaskState(taskId, record, imageTaskHotTtlSeconds);
     void upsertTaskRecord({
       taskId,
       requestId: taskId,
@@ -7636,7 +7706,7 @@ async function runImageGatewayTask(
     internal.attemptCount += 1;
     writeQueuedTaskInternalState(task, internal);
   }
-  await setImageTaskState(taskId, task, effectiveImageTaskTtlSeconds());
+  await setImageTaskState(taskId, task, imageTaskHotTtlSeconds);
 
   try {
     const asyncMultipartSources = asyncTaskImageSourcesForPayload({
@@ -7663,7 +7733,7 @@ async function runImageGatewayTask(
         message: 'No eligible image provider is currently available.',
       };
       task.updated_at = Date.now();
-      await setImageTaskState(taskId, task, effectiveImageTaskTtlSeconds());
+      await setImageTaskState(taskId, task, imageTaskHotTtlSeconds);
       void finalizeAsyncSubmissionTrace({
         source: 'tenant_runtime_async_complete',
         scope: 'full_chain',
@@ -7721,6 +7791,7 @@ async function runImageGatewayTask(
       bodyBinaryBase64: result.response.bodyBinaryBase64,
       bodyBinaryExtension: result.response.bodyBinaryExtension,
       bodyBinaryFileName: result.response.bodyBinaryFileName,
+      responseFormatOverride: result.response.ok ? 'url' : undefined,
     });
     task.result = result.response.ok
       ? taskResponsePayload
@@ -7736,7 +7807,7 @@ async function runImageGatewayTask(
     }
     task.error = downstreamError;
     task.updated_at = Date.now();
-    await setImageTaskState(taskId, task, effectiveImageTaskTtlSeconds());
+    await setImageTaskState(taskId, task, imageTaskHotTtlSeconds);
     if (result.response.ok) {
       void providerRegistry.reportAttempt({
         providerId: result.resolved.provider.providerId,
@@ -7854,7 +7925,7 @@ async function runImageGatewayTask(
     task.status = 'failed';
     task.error = error instanceof Error ? error.message : 'unknown_error';
     task.updated_at = Date.now();
-    await setImageTaskState(taskId, task, effectiveImageTaskTtlSeconds());
+    await setImageTaskState(taskId, task, imageTaskHotTtlSeconds);
     void upsertTaskRecord({
       taskId,
       requestId: taskId,
