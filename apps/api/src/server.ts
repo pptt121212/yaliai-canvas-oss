@@ -120,7 +120,10 @@ requireSharedHotState('api_server');
 const port = Number(process.env.PORT || 4010);
 const host = process.env.HOST || '0.0.0.0';
 const gracefulShutdownTimeoutMs = Math.max(30_000, Number(process.env.GRACEFUL_SHUTDOWN_TIMEOUT_MS || 11 * 60_000));
-const imageTaskTtlSeconds = 60 * 15;
+const configuredImageTaskTtlSeconds = Math.max(
+  60 * 15,
+  Math.floor(Number(process.env.ASYNC_IMAGE_TASK_TTL_SECONDS || 60 * 720)),
+);
 const asyncImageQueueMax = Math.max(1, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_MAX || 200)));
 const asyncImageQueuePerApiKeyMax = Math.max(1, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_PER_API_KEY_MAX || 20)));
 const asyncImageQueueWaitMs = Math.max(5_000, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_WAIT_MS || 60_000)));
@@ -480,7 +483,7 @@ async function cleanupStaleMultipartInputSpools() {
 
 async function cleanupStaleAsyncTaskAssets() {
   await fs.mkdir(asyncTaskAssetRoot, { recursive: true });
-  const cutoff = Date.now() - imageTaskTtlSeconds * 1000;
+  const cutoff = Date.now() - effectiveImageTaskTtlSeconds() * 1000;
   const entries = await fs.readdir(asyncTaskAssetRoot, { withFileTypes: true });
   await Promise.all(entries.filter((entry) => entry.isDirectory()).map(async (entry) => {
     const directory = path.join(asyncTaskAssetRoot, entry.name);
@@ -3597,12 +3600,43 @@ function summarizeTrace(operation: 'generations' | 'edits', statusCode?: number,
   return `${operation} ${ok ? 'success' : 'failed'}${statusCode ? ` HTTP ${statusCode}` : ''}`.trim();
 }
 
+function effectiveImageTaskTtlSeconds() {
+  return Math.max(configuredImageTaskTtlSeconds, Math.ceil(effectiveGeneratedImageRetentionMs() / 1000));
+}
+
 function isTaskExpired(task: { updated_at?: number; created_at?: number }) {
   const lastTouchedAt = Number(task.updated_at || task.created_at || 0);
   if (!lastTouchedAt) {
     return true;
   }
-  return Date.now() - lastTouchedAt > imageTaskTtlSeconds * 1000;
+  return Date.now() - lastTouchedAt > effectiveImageTaskTtlSeconds() * 1000;
+}
+
+function imageTaskStateFromTaskRecord(record: TaskMasterRecord | null): ImageGatewayTaskState | null {
+  if (!record || (record.operation !== 'generations' && record.operation !== 'edits')) {
+    return null;
+  }
+  if (record.status !== 'completed' && record.status !== 'failed' && record.status !== 'cancelled') {
+    return null;
+  }
+  const requestPayload = record.requestPayload || {};
+  return {
+    task_id: record.taskId,
+    operation: record.operation,
+    provider_id: record.providerId || record.upstreamId || '',
+    status: record.status === 'completed'
+      ? 'completed'
+      : record.status === 'cancelled'
+        ? 'cancelled'
+        : 'failed',
+    created_at: Number(record.createdAt || Date.now()),
+    updated_at: Number(record.updatedAt || record.completedAt || record.createdAt || Date.now()),
+    started_at: undefined,
+    queue_expires_at: undefined,
+    request_plan: (requestPayload.requestPlan || {}) as Record<string, unknown>,
+    result: record.responsePayload || null,
+    error: record.errorPayload || null,
+  };
 }
 
 async function getImageTaskState(taskId: string) {
@@ -3610,7 +3644,7 @@ async function getImageTaskState(taskId: string) {
     try {
       const remote = await asyncHotStateStore.getImageTask(taskId);
       if (remote) {
-        hotStateStore.setImageTask(taskId, remote, imageTaskTtlSeconds);
+        hotStateStore.setImageTask(taskId, remote, effectiveImageTaskTtlSeconds());
         return remote;
       }
     } catch (error) {
@@ -3620,10 +3654,23 @@ async function getImageTaskState(taskId: string) {
       requestLogWarn('redis_image_task_read_fallback_miss', error);
     }
   }
-  return hotStateStore.getImageTask(taskId);
+  const local = hotStateStore.getImageTask(taskId);
+  if (local) {
+    return local;
+  }
+  try {
+    const recovered = imageTaskStateFromTaskRecord(await operationalRepository.getTask(taskId));
+    if (recovered) {
+      await setImageTaskState(taskId, recovered, effectiveImageTaskTtlSeconds());
+    }
+    return recovered;
+  } catch (error) {
+    requestLogWarn('image_task_master_recover_failed', error);
+    return null;
+  }
 }
 
-async function setImageTaskState(taskId: string, task: ImageGatewayTaskState, ttlSeconds = imageTaskTtlSeconds) {
+async function setImageTaskState(taskId: string, task: ImageGatewayTaskState, ttlSeconds = effectiveImageTaskTtlSeconds()) {
   hotStateStore.setImageTask(taskId, task, ttlSeconds);
   if (!asyncHotStateStore) {
     return;
@@ -5076,7 +5123,7 @@ async function failQueuedImageTask(input: {
   input.task.status = 'failed';
   input.task.error = input.errorPayload;
   input.task.updated_at = Date.now();
-  await setImageTaskState(input.task.task_id, input.task, imageTaskTtlSeconds);
+  await setImageTaskState(input.task.task_id, input.task, effectiveImageTaskTtlSeconds());
   void upsertTaskRecord({
     taskId: input.task.task_id,
     requestId: input.task.task_id,
@@ -7533,7 +7580,7 @@ async function createImageGatewayTask(input: {
       imageAssets: persistedAssets.imageAssets,
     });
     // Keep the admission reservation until this task is visible to every PM2 worker.
-    await setImageTaskState(taskId, record, imageTaskTtlSeconds);
+    await setImageTaskState(taskId, record, effectiveImageTaskTtlSeconds());
     void upsertTaskRecord({
       taskId,
       requestId: taskId,
@@ -7589,7 +7636,7 @@ async function runImageGatewayTask(
     internal.attemptCount += 1;
     writeQueuedTaskInternalState(task, internal);
   }
-  await setImageTaskState(taskId, task, imageTaskTtlSeconds);
+  await setImageTaskState(taskId, task, effectiveImageTaskTtlSeconds());
 
   try {
     const asyncMultipartSources = asyncTaskImageSourcesForPayload({
@@ -7616,7 +7663,7 @@ async function runImageGatewayTask(
         message: 'No eligible image provider is currently available.',
       };
       task.updated_at = Date.now();
-      await setImageTaskState(taskId, task, imageTaskTtlSeconds);
+      await setImageTaskState(taskId, task, effectiveImageTaskTtlSeconds());
       void finalizeAsyncSubmissionTrace({
         source: 'tenant_runtime_async_complete',
         scope: 'full_chain',
@@ -7689,7 +7736,7 @@ async function runImageGatewayTask(
     }
     task.error = downstreamError;
     task.updated_at = Date.now();
-    await setImageTaskState(taskId, task, imageTaskTtlSeconds);
+    await setImageTaskState(taskId, task, effectiveImageTaskTtlSeconds());
     if (result.response.ok) {
       void providerRegistry.reportAttempt({
         providerId: result.resolved.provider.providerId,
@@ -7807,7 +7854,7 @@ async function runImageGatewayTask(
     task.status = 'failed';
     task.error = error instanceof Error ? error.message : 'unknown_error';
     task.updated_at = Date.now();
-    await setImageTaskState(taskId, task, imageTaskTtlSeconds);
+    await setImageTaskState(taskId, task, effectiveImageTaskTtlSeconds());
     void upsertTaskRecord({
       taskId,
       requestId: taskId,
