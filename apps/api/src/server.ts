@@ -6936,6 +6936,9 @@ function isImagePayloadKey(key: string) {
 
 function compactSuccessfulImagePayloadForStorage(value: unknown, key = ''): unknown {
   if (typeof value === 'string') {
+    if (value.startsWith('<image payload omitted:')) {
+      return value;
+    }
     if (isImagePayloadKey(key) || /^data:image\/[a-zA-Z0-9.+-]+;base64,/i.test(value)) {
       return imagePayloadOmission(value);
     }
@@ -7063,6 +7066,59 @@ async function buildImageTaskQueryResponse(request: any, task: ImageGatewayTaskS
         data: convertedData,
       },
     }),
+  };
+}
+
+function buildAsyncTraceDownstreamResponse(input: {
+  task: ImageGatewayTaskState;
+  routing?: unknown;
+}) {
+  return {
+    task_id: input.task.task_id,
+    status: input.task.status,
+    result: normalizeAsyncTraceResultForRequestedResponseFormat(input.task.result),
+    routing: input.routing,
+  };
+}
+
+function normalizeAsyncTraceResultForRequestedResponseFormat(result: unknown) {
+  const publicResult = sanitizePublicTaskResult(result);
+  if (!publicResult || typeof publicResult !== 'object' || Array.isArray(publicResult)) {
+    return publicResult;
+  }
+  const record = publicResult as Record<string, unknown>;
+  const requestMeta = record.requestMeta && typeof record.requestMeta === 'object' && !Array.isArray(record.requestMeta)
+    ? record.requestMeta as Record<string, unknown>
+    : {};
+  if (requestMeta.responseFormat !== 'b64_json') {
+    return publicResult;
+  }
+  const body = record.body && typeof record.body === 'object' && !Array.isArray(record.body)
+    ? record.body as Record<string, unknown>
+    : null;
+  if (!body || !Array.isArray(body.data)) {
+    return publicResult;
+  }
+  return {
+    ...record,
+    body: {
+      ...body,
+      data: body.data.map((item) => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) {
+          return item;
+        }
+        const imageItem = { ...item as Record<string, unknown> };
+        if (typeof imageItem.b64_json !== 'string') {
+          delete imageItem.url;
+          imageItem.b64_json = '<image payload omitted: returned as b64_json on task query; stored internally as URL>';
+        }
+        return imageItem;
+      }),
+    },
+    requestMeta: {
+      ...requestMeta,
+      traceResponseFormat: 'b64_json',
+    },
   };
 }
 
@@ -7897,12 +7953,10 @@ async function runImageGatewayTask(
         headers: request.headers,
         payload,
       },
-      downstreamResponse: {
-        task_id: taskId,
-        status: task.status,
-        result: task.result,
+      downstreamResponse: buildAsyncTraceDownstreamResponse({
+        task,
         routing: result.routing,
-      },
+      }),
       upstreamRequest: {
         url: result.resolved.requestPlan.url,
         method: result.resolved.requestPlan.method,
