@@ -16,6 +16,11 @@ export type PublicApiConfig = {
   authMode: 'admin_key' | 'tenant_key' | 'disabled';
   rateLimitPerMinute: number;
   maxConcurrency: number;
+  asyncQueueMax: number;
+  asyncQueuePerApiKeyMax: number;
+  asyncQueueDispatchPerTick: number;
+  asyncQueuePollMs: number;
+  asyncQueueWaitMs: number;
   maxInputImageMb: number;
   maxInputImageCount: number;
   maxInputImageTotalMb: number;
@@ -78,6 +83,11 @@ const defaultControlPlaneConfig: AdminControlPlaneConfig = {
     authMode: 'tenant_key',
     rateLimitPerMinute: 3000,
     maxConcurrency: 120,
+    asyncQueueMax: Math.max(1, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_MAX || 500))),
+    asyncQueuePerApiKeyMax: Math.max(1, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_PER_API_KEY_MAX || 20))),
+    asyncQueueDispatchPerTick: Math.max(1, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_DISPATCH_PER_TICK || 25))),
+    asyncQueuePollMs: Math.max(250, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_POLL_MS || 1_000))),
+    asyncQueueWaitMs: Math.max(5_000, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_WAIT_MS || 60_000))),
     maxInputImageMb: 12,
     maxInputImageCount: 6,
     maxInputImageTotalMb: 30,
@@ -133,6 +143,26 @@ function mergeWithDefaults(input: Partial<AdminControlPlaneConfig> | null | unde
         : defaultControlPlaneConfig.publicApi.authMode,
       rateLimitPerMinute: Math.max(0, Math.floor(Number(publicApi.rateLimitPerMinute ?? defaultControlPlaneConfig.publicApi.rateLimitPerMinute))),
       maxConcurrency: Math.max(0, Math.floor(Number(publicApi.maxConcurrency ?? defaultControlPlaneConfig.publicApi.maxConcurrency))),
+      asyncQueueMax: Math.max(
+        1,
+        Math.min(10_000, Math.floor(Number(publicApi.asyncQueueMax ?? defaultControlPlaneConfig.publicApi.asyncQueueMax))),
+      ),
+      asyncQueuePerApiKeyMax: Math.max(
+        1,
+        Math.min(1_000, Math.floor(Number(publicApi.asyncQueuePerApiKeyMax ?? defaultControlPlaneConfig.publicApi.asyncQueuePerApiKeyMax))),
+      ),
+      asyncQueueDispatchPerTick: Math.max(
+        1,
+        Math.min(1_000, Math.floor(Number(publicApi.asyncQueueDispatchPerTick ?? defaultControlPlaneConfig.publicApi.asyncQueueDispatchPerTick))),
+      ),
+      asyncQueuePollMs: Math.max(
+        250,
+        Math.min(60_000, Math.floor(Number(publicApi.asyncQueuePollMs ?? defaultControlPlaneConfig.publicApi.asyncQueuePollMs))),
+      ),
+      asyncQueueWaitMs: Math.max(
+        5_000,
+        Math.min(30 * 60_000, Math.floor(Number(publicApi.asyncQueueWaitMs ?? defaultControlPlaneConfig.publicApi.asyncQueueWaitMs))),
+      ),
       maxInputImageMb: Math.max(
         1,
         Math.min(12, Number(publicApi.maxInputImageMb ?? defaultControlPlaneConfig.publicApi.maxInputImageMb)),

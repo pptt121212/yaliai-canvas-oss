@@ -15,6 +15,11 @@ export type AdminControlPlaneConfig = {
     authMode: 'admin_key' | 'tenant_key' | 'disabled';
     rateLimitPerMinute: number;
     maxConcurrency: number;
+    asyncQueueMax: number;
+    asyncQueuePerApiKeyMax: number;
+    asyncQueueDispatchPerTick: number;
+    asyncQueuePollMs: number;
+    asyncQueueWaitMs: number;
     maxInputImageMb: number;
     maxInputImageCount: number;
     maxInputImageTotalMb: number;

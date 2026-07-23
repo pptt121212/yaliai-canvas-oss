@@ -309,6 +309,41 @@ export function OverviewPage({
                   <InputNumber min={0} style={{ width: '100%' }} />
                 </Form.Item>
                 <Form.Item
+                  name={['publicApi', 'asyncQueueMax']}
+                  label="异步队列总容量"
+                  extra="所有租户 Key 合计可排队的异步图像任务数量。建议高并发场景设为 500。"
+                >
+                  <InputNumber min={1} max={10000} style={{ width: '100%' }} />
+                </Form.Item>
+                <Form.Item
+                  name={['publicApi', 'asyncQueuePerApiKeyMax']}
+                  label="单 Key 异步排队上限"
+                  extra="单个 API Key 最多同时排队的异步任务；保持 20 可避免单个用户占满总队列。"
+                >
+                  <InputNumber min={1} max={1000} style={{ width: '100%' }} />
+                </Form.Item>
+                <Form.Item
+                  name={['publicApi', 'asyncQueueDispatchPerTick']}
+                  label="异步每轮派发数量"
+                  extra="每个 API 进程每轮最多启动的异步任务数；双 PM2 进程下 25 约等于每秒最多派发 50 个。"
+                >
+                  <InputNumber min={1} max={1000} style={{ width: '100%' }} />
+                </Form.Item>
+                <Form.Item
+                  name={['publicApi', 'asyncQueuePollMs']}
+                  label="异步队列轮询间隔（毫秒）"
+                  extra="队列泵检查待执行任务的间隔，建议 1000 毫秒。"
+                >
+                  <InputNumber min={250} max={60000} step={250} style={{ width: '100%' }} />
+                </Form.Item>
+                <Form.Item
+                  name={['publicApi', 'asyncQueueWaitMs']}
+                  label="异步排队超时（毫秒）"
+                  extra="任务排队超过该时间仍未启动会失败返回可重试过载错误，建议 60000 毫秒。"
+                >
+                  <InputNumber min={5000} max={1800000} step={5000} style={{ width: '100%' }} />
+                </Form.Item>
+                <Form.Item
                   name={['publicApi', 'maxInputImageMb']}
                   label="单张参考图大小（MB）"
                   extra="最多 12MB，适用于 Base64、URL 下载和 multipart 文件。"

@@ -125,11 +125,11 @@ const configuredImageTaskQueryTtlSeconds = Math.max(
   60 * 15,
   Math.floor(Number(process.env.ASYNC_IMAGE_TASK_TTL_SECONDS || 60 * 720)),
 );
-const asyncImageQueueMax = Math.max(1, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_MAX || 200)));
-const asyncImageQueuePerApiKeyMax = Math.max(1, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_PER_API_KEY_MAX || 20)));
-const asyncImageQueueWaitMs = Math.max(5_000, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_WAIT_MS || 60_000)));
-const asyncImageQueuePollMs = Math.max(250, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_POLL_MS || 1_000)));
-const asyncImageQueueDispatchPerTick = Math.max(1, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_DISPATCH_PER_TICK || 4)));
+const defaultAsyncImageQueueMax = Math.max(1, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_MAX || 500)));
+const defaultAsyncImageQueuePerApiKeyMax = Math.max(1, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_PER_API_KEY_MAX || 20)));
+const defaultAsyncImageQueueWaitMs = Math.max(5_000, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_WAIT_MS || 60_000)));
+const defaultAsyncImageQueuePollMs = Math.max(250, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_POLL_MS || 1_000)));
+const defaultAsyncImageQueueDispatchPerTick = Math.max(1, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_DISPATCH_PER_TICK || 25)));
 const asyncImageTaskClaimTtlSeconds = Math.max(15, Math.floor(Number(process.env.ASYNC_IMAGE_TASK_CLAIM_TTL_SECONDS || 120)));
 const imagePersistenceOutboxEnabled = String(process.env.IMAGE_PERSISTENCE_OUTBOX_ENABLED || 'true').toLowerCase() !== 'false';
 const imagePersistenceOutboxPollMs = Math.max(250, Math.floor(Number(process.env.IMAGE_PERSISTENCE_OUTBOX_POLL_MS || 1_000)));
@@ -5020,6 +5020,32 @@ function dynamicOverloadError() {
   });
 }
 
+function getAsyncImageQueueRuntimeConfig() {
+  const publicApi = adminControlPlaneStore.get().publicApi;
+  return {
+    maxQueued: Math.max(
+      1,
+      Math.min(10_000, Math.floor(Number(publicApi.asyncQueueMax ?? defaultAsyncImageQueueMax))),
+    ),
+    perApiKeyMaxQueued: Math.max(
+      1,
+      Math.min(1_000, Math.floor(Number(publicApi.asyncQueuePerApiKeyMax ?? defaultAsyncImageQueuePerApiKeyMax))),
+    ),
+    dispatchPerTick: Math.max(
+      1,
+      Math.min(1_000, Math.floor(Number(publicApi.asyncQueueDispatchPerTick ?? defaultAsyncImageQueueDispatchPerTick))),
+    ),
+    pollMs: Math.max(
+      250,
+      Math.min(60_000, Math.floor(Number(publicApi.asyncQueuePollMs ?? defaultAsyncImageQueuePollMs))),
+    ),
+    waitMs: Math.max(
+      5_000,
+      Math.min(30 * 60_000, Math.floor(Number(publicApi.asyncQueueWaitMs ?? defaultAsyncImageQueueWaitMs))),
+    ),
+  };
+}
+
 async function buildCanvasUserSessionPayload(input: {
   user: CanvasUserRecord;
   rawApiKey?: string;
@@ -7698,11 +7724,12 @@ async function createImageGatewayTask(input: {
   }
   let persistedAssets: Awaited<ReturnType<typeof persistAsyncTaskMultipartAssets>> | undefined;
   try {
+    const queueConfig = getAsyncImageQueueRuntimeConfig();
     const queueState = await inspectAsyncQueueState(input.accessContext);
-    if (queueState.totalQueuedCount >= asyncImageQueueMax || queueState.apiKeyQueuedCount >= asyncImageQueuePerApiKeyMax) {
+    if (queueState.totalQueuedCount >= queueConfig.maxQueued || queueState.apiKeyQueuedCount >= queueConfig.perApiKeyMaxQueued) {
       const error = new Error('Async image queue is full.');
       (error as Error & { statusCode?: number; code?: string }).statusCode = 429;
-      (error as Error & { statusCode?: number; code?: string }).code = queueState.totalQueuedCount >= asyncImageQueueMax
+      (error as Error & { statusCode?: number; code?: string }).code = queueState.totalQueuedCount >= queueConfig.maxQueued
         ? 'async_queue_full'
         : 'async_queue_per_key_full';
       throw error;
@@ -7715,7 +7742,7 @@ async function createImageGatewayTask(input: {
       status: 'queued',
       created_at: now,
       updated_at: now,
-      queue_expires_at: now + asyncImageQueueWaitMs,
+      queue_expires_at: now + queueConfig.waitMs,
       request_plan: sanitizeRequestPlanForTaskState(input.requestPlan),
       result: null,
       error: null,
@@ -8094,9 +8121,10 @@ async function processAsyncImageQueue() {
     const queuedTasks = (await listQueuedImageTasks())
       .sort((left, right) => left.created_at - right.created_at);
 
+    const queueConfig = getAsyncImageQueueRuntimeConfig();
     let dispatched = 0;
     for (const queuedTask of queuedTasks) {
-      if (dispatched >= asyncImageQueueDispatchPerTick) {
+      if (dispatched >= queueConfig.dispatchPerTick) {
         break;
       }
 
@@ -8192,9 +8220,16 @@ async function processAsyncImageQueue() {
   }
 }
 
-setInterval(() => {
-  void processAsyncImageQueue();
-}, asyncImageQueuePollMs).unref();
+function scheduleAsyncImageQueuePoll() {
+  const timer = setTimeout(() => {
+    void processAsyncImageQueue()
+      .catch((error) => requestLogWarn('async_image_queue_poll_failed', error))
+      .finally(scheduleAsyncImageQueuePoll);
+  }, getAsyncImageQueueRuntimeConfig().pollMs);
+  timer.unref();
+}
+
+scheduleAsyncImageQueuePoll();
 
 setInterval(() => {
   void processImagePersistenceOutbox();
@@ -8726,8 +8761,9 @@ app.post('/v1/images/generations', { bodyLimit: imageRouteBodyLimitBytes }, asyn
     return dynamicOverloadError();
   }
   if (payload.async) {
+    const queueConfig = getAsyncImageQueueRuntimeConfig();
     const queueState = await inspectAsyncQueueState(accessContext);
-    if (queueState.totalQueuedCount >= asyncImageQueueMax) {
+    if (queueState.totalQueuedCount >= queueConfig.maxQueued) {
       reply.code(429);
       return imageEndpointError({
         code: 'async_queue_full',
@@ -8735,12 +8771,12 @@ app.post('/v1/images/generations', { bodyLimit: imageRouteBodyLimitBytes }, asyn
         statusCode: 429,
         failureCategory: 'retryable_overloaded',
         details: {
-          queue_limit: asyncImageQueueMax,
+          queue_limit: queueConfig.maxQueued,
           queued_count: queueState.totalQueuedCount,
         },
       });
     }
-    if (queueState.apiKeyQueuedCount >= asyncImageQueuePerApiKeyMax) {
+    if (queueState.apiKeyQueuedCount >= queueConfig.perApiKeyMaxQueued) {
       reply.code(429);
       return imageEndpointError({
         code: 'async_queue_per_key_full',
@@ -8748,7 +8784,7 @@ app.post('/v1/images/generations', { bodyLimit: imageRouteBodyLimitBytes }, asyn
         statusCode: 429,
         failureCategory: 'retryable_overloaded',
         details: {
-          queue_limit: asyncImageQueuePerApiKeyMax,
+          queue_limit: queueConfig.perApiKeyMaxQueued,
           queued_count: queueState.apiKeyQueuedCount,
         },
       });
@@ -8978,8 +9014,9 @@ app.post('/v1/images/edits', { bodyLimit: imageRouteBodyLimitBytes }, async (req
     return dynamicOverloadError();
   }
   if (payload.async) {
+    const queueConfig = getAsyncImageQueueRuntimeConfig();
     const queueState = await inspectAsyncQueueState(accessContext);
-    if (queueState.totalQueuedCount >= asyncImageQueueMax) {
+    if (queueState.totalQueuedCount >= queueConfig.maxQueued) {
       reply.code(429);
       return imageEndpointError({
         code: 'async_queue_full',
@@ -8987,12 +9024,12 @@ app.post('/v1/images/edits', { bodyLimit: imageRouteBodyLimitBytes }, async (req
         statusCode: 429,
         failureCategory: 'retryable_overloaded',
         details: {
-          queue_limit: asyncImageQueueMax,
+          queue_limit: queueConfig.maxQueued,
           queued_count: queueState.totalQueuedCount,
         },
       });
     }
-    if (queueState.apiKeyQueuedCount >= asyncImageQueuePerApiKeyMax) {
+    if (queueState.apiKeyQueuedCount >= queueConfig.perApiKeyMaxQueued) {
       reply.code(429);
       return imageEndpointError({
         code: 'async_queue_per_key_full',
@@ -9000,7 +9037,7 @@ app.post('/v1/images/edits', { bodyLimit: imageRouteBodyLimitBytes }, async (req
         statusCode: 429,
         failureCategory: 'retryable_overloaded',
         details: {
-          queue_limit: asyncImageQueuePerApiKeyMax,
+          queue_limit: queueConfig.perApiKeyMaxQueued,
           queued_count: queueState.apiKeyQueuedCount,
         },
       });
