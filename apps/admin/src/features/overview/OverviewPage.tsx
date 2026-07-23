@@ -346,11 +346,8 @@ export function OverviewPage({
                 <Form.Item name={['publicApi', 'overloadGuardMaxEventLoopDelayMs']} label="最高事件循环延迟（毫秒）">
                   <InputNumber min={25} max={10000} style={{ width: '100%' }} />
                 </Form.Item>
-                <Form.Item name={['publicApi', 'defaultResponseFormat']} label="默认返回格式">
-                  <Select options={[{ value: 'url', label: 'URL' }, { value: 'b64_json', label: 'Base64' }]} />
-                </Form.Item>
                 <Text type="secondary">
-                  默认返回格式只在下游未传 `response_format` 时生效；下游明确传 `url` 或 `b64_json` 时会按请求处理。通常推荐默认使用 `url`，响应更轻、更适合开放平台与中转场景。
+                  未传 `response_format` 或明确传 `url` 时返回 URL；仅明确传 `b64_json` 时返回 Base64。URL 响应更轻，更适合开放平台与异步查询场景。
                 </Text>
                 <Space wrap>
                   <Form.Item name={['publicApi', 'exposeGenerations']} label="文生图接口" valuePropName="checked">

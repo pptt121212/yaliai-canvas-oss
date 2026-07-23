@@ -13,7 +13,6 @@ export type RoutingPolicyConfig = {
 
 export type PublicApiConfig = {
   enabled: boolean;
-  defaultResponseFormat: 'url' | 'b64_json';
   authMode: 'admin_key' | 'tenant_key' | 'disabled';
   rateLimitPerMinute: number;
   maxConcurrency: number;
@@ -76,7 +75,6 @@ const defaultControlPlaneConfig: AdminControlPlaneConfig = {
   },
   publicApi: {
     enabled: true,
-    defaultResponseFormat: 'url',
     authMode: 'tenant_key',
     rateLimitPerMinute: 3000,
     maxConcurrency: 120,
@@ -130,7 +128,6 @@ function mergeWithDefaults(input: Partial<AdminControlPlaneConfig> | null | unde
     },
     publicApi: {
       enabled: typeof publicApi.enabled === 'boolean' ? publicApi.enabled : defaultControlPlaneConfig.publicApi.enabled,
-      defaultResponseFormat: publicApi.defaultResponseFormat === 'b64_json' ? 'b64_json' : 'url',
       authMode: publicApi.authMode === 'admin_key' || publicApi.authMode === 'disabled' || publicApi.authMode === 'tenant_key'
         ? publicApi.authMode
         : defaultControlPlaneConfig.publicApi.authMode,

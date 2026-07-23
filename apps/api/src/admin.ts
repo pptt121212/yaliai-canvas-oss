@@ -94,7 +94,6 @@ const controlPlaneSchema = z.object({
   }),
   publicApi: z.object({
     enabled: z.boolean(),
-    defaultResponseFormat: z.enum(['url', 'b64_json']),
     authMode: z.enum(['admin_key', 'tenant_key', 'disabled']),
     rateLimitPerMinute: z.number().int().nonnegative(),
     maxConcurrency: z.number().int().nonnegative(),

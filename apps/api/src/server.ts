@@ -933,14 +933,9 @@ function normalizeOpenAIImagesPayload(payload: z.infer<typeof openAIImagesSchema
   };
 }
 
-type DownstreamImageResponseFormat = 'url' | 'b64_json' | 'both';
-
-const implicitImageResponseFormatMetadataKey = '__yali_implicit_image_response_format';
+type DownstreamImageResponseFormat = 'url' | 'b64_json';
 
 function resolveDownstreamImageResponseFormat(payload: z.infer<typeof openAIImagesSchema>): DownstreamImageResponseFormat {
-  if (payload.metadata?.[implicitImageResponseFormatMetadataKey] === 'both') {
-    return 'both';
-  }
   return payload.response_format === 'b64_json' ? 'b64_json' : 'url';
 }
 
@@ -949,14 +944,9 @@ function normalizePublicOpenAIImagesPayload(payload: z.infer<typeof openAIImages
   if (normalized.response_format) {
     return normalized;
   }
-  const defaultResponseFormat = adminControlPlaneStore.get().publicApi.defaultResponseFormat;
   return {
     ...normalized,
-    metadata: {
-      ...(normalized.metadata || {}),
-      [implicitImageResponseFormatMetadataKey]: 'both',
-    },
-    response_format: defaultResponseFormat === 'b64_json' ? 'b64_json' as const : 'url' as const,
+    response_format: 'url' as const,
   };
 }
 
@@ -7662,7 +7652,6 @@ async function runImageGatewayTask(
       bodyBinaryBase64: result.response.bodyBinaryBase64,
       bodyBinaryExtension: result.response.bodyBinaryExtension,
       bodyBinaryFileName: result.response.bodyBinaryFileName,
-      responseFormatOverride: 'url',
     });
     task.result = result.response.ok
       ? taskResponsePayload
@@ -7719,7 +7708,6 @@ async function runImageGatewayTask(
       responseBodyBinaryBase64: result.response.bodyBinaryBase64,
       responseBodyBinaryExtension: result.response.bodyBinaryExtension,
       responseBodyBinaryFileName: result.response.bodyBinaryFileName,
-      responseFormatOverride: 'url',
       errorPayload: task.error && typeof task.error === 'object' ? task.error as Record<string, unknown> : null,
       responsePayload: taskResponsePayload,
     });

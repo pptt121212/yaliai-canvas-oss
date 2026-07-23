@@ -202,11 +202,11 @@ Content-Type: application/json
     ],
     downstreamRules: [
       'prompt 为必填字段；当前公开 Images 契约下，文生图和图生图都要求传入非空 prompt。',
-      'response_format 支持 url 与 b64_json；显式传入时严格返回对应格式，未传时会同时返回可访问 url 与 b64_json，兼容未声明格式的下游客户端。',
+      'response_format 支持 url 与 b64_json；显式传入时严格返回对应格式，未传时默认返回可访问的 url。',
       '同步 JSON 成功时，网关返回统一 Images 响应；同步失败时，返回统一平台错误，不直接透传上游原始报错文本。',
       'stream=true 只在同步模式生效；网关会在拿到完整图片结果后，再输出标准 SSE，而不是逐 token 或逐块实时透传上游私有流。',
       '若同时传入 async=true 与 stream=true，以 async=true 为准，首次响应固定返回任务回执而不是 SSE。',
-      'async=true 时，首次响应返回 202 与 task_id / status / provider_id / query_path / queue_position / queue_expires_at；最终图像结果需通过任务查询接口获取。',
+      'async=true 时，首次响应返回 202 与 task_id / status / query_path / queue_position / queue_expires_at；最终图像结果需通过任务查询接口获取。',
       '异步任务的最终 completed / failed 是任务执行状态，不等同于后台业务统计页里的“生成成功率”口径说明。',
       '异步任务查询接口支持：GET /v1/images/generations/:taskId、GET /v1/images/edits/:taskId、GET /v1/image/tasks/:taskId。',
       'callback_url 当前只作为兼容字段透传给上游；网关自身不会因为传了 callback_url 就主动回调下游。',
@@ -477,7 +477,6 @@ Content-Type: application/json
         responseBody: `{
   "task_id": "imgtask_xxx",
   "status": "queued",
-  "provider_id": "upstream_xxx",
   "query_path": "/v1/images/generations/imgtask_xxx",
   "queue_position": 1,
   "queue_expires_at": 1782873600
@@ -495,14 +494,8 @@ GET /v1/image/tasks/imgtask_xxx`,
   "task_id": "imgtask_xxx",
   "operation": "generations",
   "status": "completed",
-  "provider_id": "upstream_xxx",
   "created_at": 1782870000,
   "updated_at": 1782870030,
-  "request_plan": {
-    "url": "https://upstream.example.com/v1/images/generations",
-    "method": "POST",
-    "bodyFormat": "json"
-  },
   "result": {
     "statusCode": 200,
     "body": {

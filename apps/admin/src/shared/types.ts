@@ -12,7 +12,6 @@ export type AdminControlPlaneConfig = {
   };
   publicApi: {
     enabled: boolean;
-    defaultResponseFormat: 'url' | 'b64_json';
     authMode: 'admin_key' | 'tenant_key' | 'disabled';
     rateLimitPerMinute: number;
     maxConcurrency: number;
@@ -129,7 +128,6 @@ export type OverviewPayload = {
   };
   publicApi: {
     enabled: boolean;
-    defaultResponseFormat: 'url' | 'b64_json';
     authMode: 'admin_key' | 'tenant_key' | 'disabled';
     rateLimitPerMinute: number;
     maxConcurrency: number;
