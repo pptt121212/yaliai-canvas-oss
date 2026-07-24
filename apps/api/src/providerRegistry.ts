@@ -69,6 +69,27 @@ function mergeProviderRuntime(provider: ProviderConfig): ProviderConfig {
   const runtime = hotStateStore.getProviderRuntime(provider.providerId)
     || (provider.metadata?.runtime as ProviderRuntimeState | undefined);
   const mergedRuntime = normalizeRuntimeForRead(runtime, provider);
+
+  // An administrative disable is configuration, not an observed health
+  // outcome.  Runtime health is intentionally short lived and can be stale
+  // in either the local process or Redis; it must never re-enable a line
+  // which the administrator has explicitly stopped.
+  if (provider.healthState === 'disabled') {
+    return {
+      ...provider,
+      healthState: 'disabled',
+      metadata: {
+        ...(provider.metadata || {}),
+        ...(mergedRuntime ? {
+          runtime: {
+            ...mergedRuntime,
+            healthState: 'disabled',
+          },
+        } : {}),
+      },
+    };
+  }
+
   return {
     ...provider,
     healthScore: Number(mergedRuntime?.healthScore || provider.healthScore || 100),
@@ -203,7 +224,11 @@ export const providerRegistry = {
       || runtimeRegistry.getRuntimeState(providerId)
       || (provider.metadata?.runtime as ProviderRuntimeState | undefined)
       || undefined;
-    return normalizeRuntimeForRead(runtime, provider) || null;
+    const resolved = normalizeRuntimeForRead(runtime, provider);
+    if (provider.healthState === 'disabled') {
+      return resolved ? { ...resolved, healthState: 'disabled' } : null;
+    }
+    return resolved || null;
   },
   register(provider: ProviderConfig) {
     const next = listRuntimeProviders()

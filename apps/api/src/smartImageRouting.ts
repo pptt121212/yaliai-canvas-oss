@@ -648,6 +648,12 @@ function scoreFromHealth(provider: ProviderConfig) {
 }
 
 function resolveProviderRuntimeForRouting(provider: ProviderConfig) {
+  // `disabled` is an administrator-controlled configuration state.  It has
+  // higher priority than a stale shared runtime snapshot, so a disabled line
+  // can never re-enter a diagnostic preview or the executable candidate pool.
+  if (provider.healthState === 'disabled') {
+    return provider;
+  }
   const runtime = hotStateStore.getProviderRuntime(provider.providerId);
   if (!runtime) {
     return provider;
