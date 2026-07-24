@@ -7,6 +7,7 @@ delete process.env.REDIS_URL;
 
 const { hotStateStore } = await import('../apps/api/dist/src/modules/storage/runtimeStores.js');
 const { buildSmartImageRoutingPlan } = await import('../apps/api/dist/src/smartImageRouting.js');
+const { createInMemoryProviderRegistry } = await import('../packages/provider-core/dist/src/index.js');
 
 const provider = {
   providerId: 'disabled-provider-test',
@@ -47,5 +48,26 @@ const plan = await buildSmartImageRoutingPlan({
 
 assert.equal(plan.candidates.length, 0, 'a disabled provider must not become a candidate from hot health state');
 assert.deepEqual(plan.filteredOut, [{ providerId: provider.providerId, reason: 'disabled' }]);
+
+// The provider-core registry is also used by compatibility/legacy callers.
+// It must enforce the same configuration precedence after a late success.
+const coreRegistry = createInMemoryProviderRegistry([{
+  ...provider,
+  metadata: {
+    runtime: {
+      healthState: 'healthy',
+      healthScore: 100,
+      lastSuccessAt: Date.now(),
+    },
+  },
+}]);
+assert.equal(coreRegistry.get(provider.providerId)?.healthState, 'disabled');
+coreRegistry.reportAttempt({
+  providerId: provider.providerId,
+  ok: true,
+  statusCode: 200,
+  latencyMs: 1,
+});
+assert.equal(coreRegistry.get(provider.providerId)?.healthState, 'disabled', 'a late result must not re-enable a disabled provider');
 
 console.log('Disabled provider routing verification passed.');

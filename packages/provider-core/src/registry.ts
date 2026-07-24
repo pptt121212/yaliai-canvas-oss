@@ -88,7 +88,12 @@ function applyPassiveRecoveryEvidence(runtime: ProviderRuntimeState, now: number
 function normalizeRuntimeState(runtime: ProviderRuntimeState | undefined, config: ProviderConfig): ProviderRuntimeState {
   const baseHealthScore = Number(config.healthScore || 100);
   return {
-    healthState: runtime?.healthState || config.healthState || 'healthy',
+    // A configured disable is an administrative gate, not an observed
+    // runtime-health result. Never let a cached success, cooldown expiry, or
+    // a later probe promote it back into the eligible routing set.
+    healthState: config.healthState === 'disabled'
+      ? 'disabled'
+      : (runtime?.healthState || config.healthState || 'healthy'),
     healthScore: Number.isFinite(Number(runtime?.healthScore)) ? Number(runtime?.healthScore) : baseHealthScore,
     cooldownUntil: runtime?.cooldownUntil,
     fusedUntil: runtime?.fusedUntil,
@@ -160,6 +165,10 @@ export function resolveProviderRuntimeForRead(
   now = Date.now(),
 ): ProviderRuntimeState {
   const next = normalizeRuntimeState(runtime, config);
+  if (config.healthState === 'disabled') {
+    next.healthState = 'disabled';
+    return next;
+  }
   applyPassiveRecoveryEvidence(next, now);
   const cooldownExpired = Boolean(next.cooldownUntil && next.cooldownUntil <= now);
   const fusedExpired = Boolean(next.fusedUntil && next.fusedUntil <= now);
@@ -404,6 +413,10 @@ export function computeProviderRuntimeAfterAttempt(
   const config = normalizeProvider(provider);
   const now = report.failedAt || Date.now();
   const runtime = normalizeRuntimeState(currentRuntime || readSeedRuntime(config), config);
+  if (config.healthState === 'disabled') {
+    runtime.healthState = 'disabled';
+    return runtime;
+  }
   applyPassiveRecoveryEvidence(runtime, now);
   runtime.lastSelectedAt = now;
   runtime.lastCheckedAt = now;
