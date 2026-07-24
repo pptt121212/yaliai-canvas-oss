@@ -37,6 +37,7 @@ import {
 import { resolveImageCapabilityCost } from './modules/imageCapabilityMatrix.js';
 import { dynamicOverloadGuard } from './modules/runtime/dynamicOverloadGuard.js';
 import { gatewayInstanceId } from './modules/runtime/gatewayIdentity.js';
+import { isValidPngUpload } from './modules/imageInputValidation.js';
 import {
   createDownstreamCancellation,
   isDownstreamClientDisconnectedError,
@@ -365,6 +366,13 @@ function createImagePayloadTooLargeError(receivedBytes: number, maxBytes = getIm
   return error;
 }
 
+function createInvalidImagePayloadError() {
+  const error = new Error('Input image data is invalid or corrupted.');
+  (error as Error & { statusCode?: number; code?: string }).statusCode = 400;
+  (error as Error & { statusCode?: number; code?: string }).code = 'invalid_image_payload';
+  return error;
+}
+
 function isMultipartOpenAIImagesRequest(request: any) {
   return typeof request?.isMultipart === 'function' && request.isMultipart();
 }
@@ -679,6 +687,10 @@ async function spoolMultipartImageFilePart(
       await handle.write(buffer);
     }
     await handle.close();
+    const extension = detectImageExtensionFromBuffer(header);
+    if (extension === 'png' && !await isValidPngUpload(await fs.readFile(filePath))) {
+      throw createInvalidImagePayloadError();
+    }
     completed = true;
   } finally {
     if (!completed) {
