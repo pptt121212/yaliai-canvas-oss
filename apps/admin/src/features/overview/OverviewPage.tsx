@@ -309,6 +309,13 @@ export function OverviewPage({
                   <InputNumber min={0} style={{ width: '100%' }} />
                 </Form.Item>
                 <Form.Item
+                  name={['publicApi', 'upstreamImageRequestTimeoutSeconds']}
+                  label="图像上游请求超时（秒）"
+                  extra="所有图像上游共用。覆盖从发起请求到接收完整上游响应的总等待时间；默认 180 秒，慢线路可设为 300 秒。"
+                >
+                  <InputNumber min={30} max={1800} step={10} style={{ width: '100%' }} />
+                </Form.Item>
+                <Form.Item
                   name={['publicApi', 'asyncQueueMax']}
                   label="异步队列总容量"
                   extra="所有租户 Key 合计可排队的异步图像任务数量。建议高并发场景设为 500。"

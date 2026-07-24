@@ -16,6 +16,7 @@ export type PublicApiConfig = {
   authMode: 'admin_key' | 'tenant_key' | 'disabled';
   rateLimitPerMinute: number;
   maxConcurrency: number;
+  upstreamImageRequestTimeoutSeconds: number;
   asyncQueueMax: number;
   asyncQueuePerApiKeyMax: number;
   asyncQueueDispatchPerTick: number;
@@ -83,6 +84,7 @@ const defaultControlPlaneConfig: AdminControlPlaneConfig = {
     authMode: 'tenant_key',
     rateLimitPerMinute: 3000,
     maxConcurrency: 120,
+    upstreamImageRequestTimeoutSeconds: 180,
     asyncQueueMax: Math.max(1, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_MAX || 500))),
     asyncQueuePerApiKeyMax: Math.max(1, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_PER_API_KEY_MAX || 20))),
     asyncQueueDispatchPerTick: Math.max(1, Math.floor(Number(process.env.ASYNC_IMAGE_QUEUE_DISPATCH_PER_TICK || 25))),
@@ -143,6 +145,10 @@ function mergeWithDefaults(input: Partial<AdminControlPlaneConfig> | null | unde
         : defaultControlPlaneConfig.publicApi.authMode,
       rateLimitPerMinute: Math.max(0, Math.floor(Number(publicApi.rateLimitPerMinute ?? defaultControlPlaneConfig.publicApi.rateLimitPerMinute))),
       maxConcurrency: Math.max(0, Math.floor(Number(publicApi.maxConcurrency ?? defaultControlPlaneConfig.publicApi.maxConcurrency))),
+      upstreamImageRequestTimeoutSeconds: Math.max(
+        30,
+        Math.min(30 * 60, Math.floor(Number(publicApi.upstreamImageRequestTimeoutSeconds ?? defaultControlPlaneConfig.publicApi.upstreamImageRequestTimeoutSeconds))),
+      ),
       asyncQueueMax: Math.max(
         1,
         Math.min(10_000, Math.floor(Number(publicApi.asyncQueueMax ?? defaultControlPlaneConfig.publicApi.asyncQueueMax))),

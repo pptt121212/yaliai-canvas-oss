@@ -631,14 +631,14 @@ function renderRoutingOverviewFlow() {
             </div>
             <div className="routing-graph__chips">
               <Tag>provider concurrency</Tag>
-              <Tag>timeout default 180s</Tag>
+              <Tag>global timeout setting</Tag>
               <Tag>shouldFailover</Tag>
               <Tag>provider_attempts</Tag>
             </div>
           </div>
           {renderMetrics([
             { label: 'provider 并发', value: '默认 10，可按线路配置' },
-            { label: '请求超时', value: '默认 180 秒' },
+            { label: '请求超时', value: '后台总览统一配置，默认 180 秒' },
             { label: '优选/单固定', value: '首条失败即停止' },
             { label: '智能/固定线路池', value: 'shouldFailover=true 时回退' },
           ])}

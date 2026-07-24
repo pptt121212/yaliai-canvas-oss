@@ -3409,7 +3409,7 @@ async function executeUpstreamImageRequest(input: {
       && isSameProviderRetryableFailure(failure)
     );
     const attemptStartedAt = Date.now();
-    const requestTimeoutMs = resolveProviderRequestTimeoutMs(candidate.provider);
+    const requestTimeoutMs = resolveProviderRequestTimeoutMs();
     let providerConcurrencyKey: RuntimeConcurrencyLease | null = null;
     try {
       const providerConcurrency = await acquireProviderConcurrency(candidate.provider, requestTimeoutMs);
@@ -5616,20 +5616,9 @@ async function releaseProviderConcurrency(lease: RuntimeConcurrencyLease | null)
   await releaseRuntimeConcurrencyLease(lease, true);
 }
 
-function resolveProviderRequestTimeoutMs(provider: ProviderConfig) {
-  const configuredMs = Number(provider.metadata?.request_timeout_ms || provider.metadata?.upstream_request_timeout_ms || 0);
-  if (configuredMs > 0) {
-    return Math.max(1000, Math.min(30 * 60_000, configuredMs));
-  }
-  const configuredSeconds = Number(provider.metadata?.request_timeout_seconds || provider.metadata?.upstream_request_timeout_seconds || 0);
-  if (configuredSeconds > 0) {
-    return Math.max(1000, Math.min(30 * 60_000, configuredSeconds * 1000));
-  }
-  const envMs = Number(process.env.IMAGE_UPSTREAM_TIMEOUT_MS || 0);
-  if (envMs > 0) {
-    return Math.max(1000, Math.min(30 * 60_000, envMs));
-  }
-  return 180_000;
+function resolveProviderRequestTimeoutMs() {
+  const seconds = Number(adminControlPlaneStore.get().publicApi.upstreamImageRequestTimeoutSeconds || 180);
+  return Math.max(30_000, Math.min(30 * 60_000, Math.floor(seconds * 1000)));
 }
 
 function formatAttemptTime(timestamp: number) {

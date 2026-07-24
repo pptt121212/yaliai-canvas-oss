@@ -65,6 +65,7 @@ const controlPlaneSchema = z.object({
     authMode: z.enum(['admin_key', 'tenant_key', 'disabled']),
     rateLimitPerMinute: z.number().int().nonnegative(),
     maxConcurrency: z.number().int().nonnegative(),
+    upstreamImageRequestTimeoutSeconds: z.number().int().min(30).max(30 * 60),
     asyncQueueMax: z.number().int().min(1).max(10_000),
     asyncQueuePerApiKeyMax: z.number().int().min(1).max(1_000),
     asyncQueueDispatchPerTick: z.number().int().min(1).max(1_000),
