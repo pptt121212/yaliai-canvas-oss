@@ -202,13 +202,14 @@ Content-Type: application/json
     ],
     downstreamRules: [
       'prompt 为必填字段；当前公开 Images 契约下，文生图和图生图都要求传入非空 prompt。',
-      'response_format 支持 url 与 b64_json；显式传入时严格返回对应格式，未传时默认返回可访问的 url。',
+      'response_format 支持 url 与 b64_json；显式传入时严格返回对应格式，未传时默认返回可访问的 url。异步任务完成后也遵循同一规则。',
       '同步 JSON 成功时，网关返回统一 Images 响应；同步失败时，返回统一平台错误，不直接透传上游原始报错文本。',
       'stream=true 只在同步模式生效；网关会在拿到完整图片结果后，再输出标准 SSE，而不是逐 token 或逐块实时透传上游私有流。',
       '若同时传入 async=true 与 stream=true，以 async=true 为准，首次响应固定返回任务回执而不是 SSE。',
-      'async=true 时，首次响应返回 202 与 task_id / status / query_path / queue_position / queue_expires_at；最终图像结果需通过任务查询接口获取。',
-      '异步任务的最终 completed / failed 是任务执行状态，不等同于后台业务统计页里的“生成成功率”口径说明。',
-      '异步任务查询接口支持：GET /v1/images/generations/:taskId、GET /v1/images/edits/:taskId、GET /v1/image/tasks/:taskId。',
+      'async=true 时，首次响应返回 HTTP 202 与 task_id / status / query_path / queue_position / queue_expires_at；最终图像结果需通过任务查询接口获取。',
+      '异步任务只会由网关在后台执行一次；轮询查询不会再次提交或再次计费。',
+      '异步任务查询接口支持：GET /v1/images/generations/:taskId、GET /v1/images/edits/:taskId、GET /v1/image/tasks/:taskId。任务结果固定放在 result.body.data，不会平铺到查询响应顶层。',
+      '当前对外查询窗口为至少 720 分钟，并与后台“生成图片保留时间”保持一致；过期返回 404 task_expired。不要把任务 ID 公开到日志、前端地址或第三方页面。',
       'callback_url 当前只作为兼容字段透传给上游；网关自身不会因为传了 callback_url 就主动回调下游。',
       '当 provider_source=user_supplied 时，网关会改用下游请求里提供的上游地址与密钥，不再走平台租户鉴权；该能力是否允许由后台 routing.allowUserSuppliedKey 控制。',
       'provider_source=user_supplied 时，可通过 user_image_api_kind、user_api_base_url、user_images_generations_url、user_images_edits_url、user_api_key、preferred_auth_mode 指定真实上游；其中 user_image_api_kind 只接受 images_endpoint 或 responses_endpoint。',
@@ -221,14 +222,14 @@ Content-Type: application/json
       { key: 'images-prompt', field: 'prompt', role: '正式支持', source: '下游 JSON / multipart', notes: '必填。当前 Images 公开契约要求非空字符串。' },
       { key: 'images-size', field: 'size', role: '正式支持', source: '下游 JSON / multipart', notes: '可选。支持具体像素尺寸，例如 1024x1024；也兼容比例写法，例如 1:1、16:9。' },
       { key: 'images-resolution', field: 'resolution', role: '兼容字段', source: '下游 JSON / multipart', notes: '可选，仅在 size 是比例写法时参与映射。支持 1k / 2k / 4k；若 size 已经是具体像素尺寸，则 resolution 不再改变上游请求尺寸。' },
-      { key: 'images-response-format', field: 'response_format', role: '正式支持', source: '下游 JSON / multipart', notes: '可选，仅支持 url / b64_json。显式传入时严格返回对应格式；未传时同一 data 项同时返回 url 与 b64_json。' },
+      { key: 'images-response-format', field: 'response_format', role: '正式支持', source: '下游 JSON / multipart', notes: '可选，仅支持 url / b64_json。显式传入时严格返回对应格式；未传时默认只返回 url。异步任务会在查询完成结果时按此选择返回。' },
       { key: 'images-quality', field: 'quality', role: '正式支持', source: '下游 JSON / multipart', notes: '可选。用于请求画质；仍会受 API Key 画质上限约束。' },
       { key: 'images-n', field: 'n', role: '正式支持', source: '下游 JSON / multipart', notes: '可选，最大 10。表示请求图片数量。' },
       { key: 'images-user', field: 'user', role: '正式支持', source: '下游 JSON / multipart', notes: '可选。作为标准兼容字段透传给上游。' },
       { key: 'images-image', field: 'image', role: '正式支持', source: '下游 JSON / multipart', notes: '图生图参考图主字段。支持公网 URL、data URL、Base64；也支持数组形式，最多 6 张。' },
       { key: 'images-image-aliases', field: 'image_url / image_urls[] / reference_images[] / images[].image_url', role: '兼容别名', source: '下游 JSON / multipart', notes: '会先统一归一化为 image，再进入统一路由和上游改写逻辑。reference_images 是面向下游兼容的 URL 数组别名，不要求上游也使用同名字段。' },
       { key: 'images-stream', field: 'stream', role: '正式支持', source: '下游 JSON / multipart', notes: '可选布尔值。仅同步模式生效，返回网关标准化 SSE。' },
-      { key: 'images-async', field: 'async', role: '正式支持', source: '下游 JSON / multipart', notes: '可选布尔值。开启后返回异步任务回执，后续通过任务查询拿结果。' },
+      { key: 'images-async', field: 'async', role: '正式支持', source: '下游 JSON / multipart', notes: '可选布尔值。JSON 传 true；multipart 传 async=true。开启后返回 HTTP 202 任务回执，后续通过 task_id 查询结果。' },
       { key: 'images-output-format', field: 'output_format', role: '正式支持', source: '下游顶层字段或 extra_body', notes: '可选。用于期望输出格式，例如 png / jpeg / webp。' },
       { key: 'images-output-quality', field: 'output_quality', role: '正式支持', source: '下游顶层字段或 extra_body', notes: '可选。作为兼容字段透传给上游。' },
       { key: 'images-output-compression', field: 'output_compression', role: '正式支持', source: '下游顶层字段或 extra_body', notes: '可选。作为兼容字段透传给上游。' },
@@ -465,6 +466,7 @@ data: [DONE]`,
         title: '下游异步提交：async=true',
         requestLabel: '下游请求网关',
         requestBody: `POST /v1/images/generations
+Authorization: Bearer $YALIAI_API_KEY
 Content-Type: application/json
 
 {
@@ -474,12 +476,14 @@ Content-Type: application/json
   "response_format": "url"
 }`,
         responseLabel: '网关返回给下游',
-        responseBody: `{
+        responseBody: `HTTP/1.1 202 Accepted
+
+{
   "task_id": "imgtask_xxx",
   "status": "queued",
   "query_path": "/v1/images/generations/imgtask_xxx",
   "queue_position": 1,
-  "queue_expires_at": 1782873600
+  "queue_expires_at": 1784881260000
 }`,
       },
       {
@@ -494,12 +498,12 @@ GET /v1/image/tasks/imgtask_xxx`,
   "task_id": "imgtask_xxx",
   "operation": "generations",
   "status": "completed",
-  "created_at": 1782870000,
-  "updated_at": 1782870030,
+  "created_at": 1784881200000,
+  "updated_at": 1784881230000,
   "result": {
     "statusCode": 200,
     "body": {
-      "created": 1782870030,
+      "created": 1784881230,
       "data": [
         { "url": "https://api.example.com/v1/generated-images/imgsync_xxx_0.png" }
       ]
@@ -645,6 +649,136 @@ function renderExampleBlock(example: ExampleBlock) {
   );
 }
 
+function renderAsyncImagesIntegrationGuide() {
+  return (
+    <Card title="第三方接入：异步 Images API" className="diagnostic-card">
+      <Alert
+        type="info"
+        showIcon
+        message="适用于耗时图像生成与图像编辑"
+        description="在原有 Images 请求中加入 async=true。提交成功只表示任务已被网关接收并入队，不表示已经出图；请保存 task_id，并按 query_path 轮询到 completed 或 failed。"
+        style={{ marginBottom: 16 }}
+      />
+
+      <Row gutter={[16, 16]}>
+        <Col xs={24} xl={12}>
+          <Card size="small" title="1. 文生图异步提交（JSON）">
+            <pre className="json-block">{`POST /v1/images/generations
+Authorization: Bearer $YALIAI_API_KEY
+Content-Type: application/json
+
+{
+  "model": "gpt-image-2",
+  "prompt": "一只小猫，干净背景，自然光，不要文字",
+  "size": "1024x1024",
+  "response_format": "url",
+  "async": true
+}`}</pre>
+            <pre className="json-block">{`HTTP/1.1 202 Accepted
+
+{
+  "task_id": "imgtask_mrx9pug8_r13o7s",
+  "status": "queued",
+  "query_path": "/v1/images/generations/imgtask_mrx9pug8_r13o7s",
+  "queue_position": 1,
+  "queue_expires_at": 1784881260000
+}`}</pre>
+          </Card>
+        </Col>
+        <Col xs={24} xl={12}>
+          <Card size="small" title="2. 图生图异步提交（multipart/form-data）">
+            <pre className="json-block">{`curl https://api.example.com/v1/images/edits \\
+  -H "Authorization: Bearer $YALIAI_API_KEY" \\
+  -F "model=gpt-image-2" \\
+  -F "prompt=保持主体不变，改成未来城市夜景" \\
+  -F "size=1024x1024" \\
+  -F "response_format=b64_json" \\
+  -F "async=true" \\
+  -F "image=@./reference-1.png;type=image/png" \\
+  -F "image=@./reference-2.jpg;type=image/jpeg"`}</pre>
+            <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+              multipart 中 async 使用字符串 true。参考图按 image 字段的提交顺序处理；单次最多 6 张，单张最大 12 MiB，总大小最大 30 MiB。
+            </Paragraph>
+          </Card>
+        </Col>
+
+        <Col xs={24} xl={12}>
+          <Card size="small" title="3. 轮询任务状态">
+            <pre className="json-block">{`GET /v1/images/generations/imgtask_mrx9pug8_r13o7s
+Authorization: Bearer $YALIAI_API_KEY
+
+# 图生图可使用：GET /v1/images/edits/{task_id}
+# 通用查询可使用：GET /v1/image/tasks/{task_id}`}</pre>
+            <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+              建议收到 202 后等待 1–2 秒再首次查询；queued 或 running 时使用指数退避轮询（例如 2、3、5、8、10 秒），最大间隔建议不超过 10 秒。queue_position 是提交瞬间的估算值，不是执行顺序承诺。
+            </Paragraph>
+          </Card>
+        </Col>
+        <Col xs={24} xl={12}>
+          <Card size="small" title="4. 已完成：URL 或 Base64">
+            <pre className="json-block">{`{
+  "task_id": "imgtask_mrx9pug8_r13o7s",
+  "operation": "generations",
+  "status": "completed",
+  "created_at": 1784881200000,
+  "updated_at": 1784881230123,
+  "result": {
+    "statusCode": 200,
+    "body": {
+      "created": 1784881230,
+      "data": [
+        { "url": "https://api.example.com/v1/generated-images/imgtask_xxx_0.png" }
+      ]
+    }
+  },
+  "error": null
+}`}</pre>
+            <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+              最终图片始终在 result.body.data。提交时 response_format=url（或未传）返回 url；提交时 response_format=b64_json 则同一位置返回 b64_json，不会同时返回 url。Base64 仅在查询时按需生成。
+            </Paragraph>
+          </Card>
+        </Col>
+
+        <Col xs={24} xl={12}>
+          <Card size="small" title="5. 状态、失败与过期">
+            <Paragraph style={{ marginBottom: 8 }}>
+              <Text strong>queued</Text> 等待调度；<Text strong>running</Text> 正在请求上游；<Text strong>completed</Text> 可读取 result.body.data；<Text strong>failed</Text> 读取 error，不要从 result.body 取图片。
+            </Paragraph>
+            <pre className="json-block">{`{
+  "task_id": "imgtask_xxx",
+  "operation": "edits",
+  "status": "failed",
+  "result": { "statusCode": 429, "body": null },
+  "error": {
+    "error": "upstream_overloaded",
+    "message": "The image request could not be completed.",
+    "status_code": 429,
+    "failure_category": "retryable_overloaded"
+  }
+}`}</pre>
+            <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+              查询窗口到期返回 HTTP 404：<Text code>task_expired</Text>；从未存在或接口类型不匹配返回 HTTP 404：<Text code>task_not_found</Text>。当前查询窗口至少为 720 分钟，并与生成图片保留策略保持一致。
+            </Paragraph>
+          </Card>
+        </Col>
+        <Col xs={24} xl={12}>
+          <Card size="small" title="6. 客户端重试与计费建议">
+            <Paragraph style={{ marginBottom: 8 }}>
+              提交阶段收到 <Text code>429</Text>（如 <Text code>async_queue_full</Text>、<Text code>async_queue_per_key_full</Text>）或 <Text code>503</Text> 时，可使用指数退避重新提交。任务在排队超时后会以 <Text code>async_queue_timeout</Text> 进入 failed，错误状态码为 429。
+            </Paragraph>
+            <Paragraph style={{ marginBottom: 8 }}>
+              网络超时且客户端未取得 202 时，不要盲目重复提交：该任务可能已被服务端接收，重复提交会产生独立任务。当前公开接口不提供 Idempotency-Key 去重语义。
+            </Paragraph>
+            <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+              只有实际完成并生成成功的图像按正常规则计费；轮询查询本身不会再次发起上游请求或再次计费。
+            </Paragraph>
+          </Card>
+        </Col>
+      </Row>
+    </Card>
+  );
+}
+
 export function ProtocolDocsPage({ kind }: ProtocolDocsPageProps) {
   const config = docsMap[kind];
 
@@ -708,6 +842,8 @@ export function ProtocolDocsPage({ kind }: ProtocolDocsPageProps) {
           </Card>
         </Col>
       </Row>
+
+      {kind === 'images' ? renderAsyncImagesIntegrationGuide() : null}
 
       <Card title="关键字段与能力边界" className="diagnostic-card">
         <Table
