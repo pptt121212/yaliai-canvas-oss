@@ -5984,6 +5984,9 @@ function publicMessageForFailureCategory(category: string) {
   if (category === 'retryable_no_provider') {
     return 'No available service could accept the request at this time.';
   }
+  if (category === 'retryable_upstream_capability') {
+    return 'No available upstream could accept the requested image capability.';
+  }
   if (category.startsWith('retryable_')) {
     return 'The service is temporarily unavailable. Retry in a moment.';
   }
@@ -6090,7 +6093,9 @@ function buildUpstreamFailureEnvelope(input: {
       ? 'upstream_safety_rejected'
       : failureCategory === 'retryable_upstream_dispatch'
         ? 'upstream_temporary_failure'
-      : classifyDownstreamErrorCode(input.statusCode),
+        : failureCategory === 'retryable_upstream_capability'
+          ? 'upstream_capability_unavailable'
+        : classifyDownstreamErrorCode(input.statusCode),
     message: sanitizeDownstreamFailureMessage(failureCategory),
     statusCode: input.statusCode,
     failureCategory,

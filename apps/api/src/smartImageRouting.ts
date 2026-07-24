@@ -1169,6 +1169,25 @@ export function classifyUpstreamFailure(input: {
       affectsHealth: true,
     };
   }
+  // Some OpenAI-compatible upstreams reject an otherwise valid request only
+  // because their accepted pixel-size set is narrower than the gateway's
+  // public Images contract. This is a provider capability/API failure, not a
+  // prompt or reference-image rejection. Let smart/fixed provider pools try
+  // their next eligible line and let runtime health temporarily cool this one.
+  if (
+    haystack.includes('invalid image size')
+    || haystack.includes('invalid_image_size')
+    || haystack.includes('unsupported image size')
+    || haystack.includes('image size not supported')
+    || haystack.includes('size is not supported')
+  ) {
+    return {
+      category: 'retryable_upstream_capability',
+      shouldFailover: true,
+      cooldownMs: 5 * 60_000,
+      affectsHealth: true,
+    };
+  }
   if ([400, 410, 415, 422].includes(statusCode)) {
     const userContentSignals = [
       'safety',

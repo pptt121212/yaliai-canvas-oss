@@ -53,6 +53,15 @@ const cases = [
     shouldFailover: true,
   },
   {
+    name: 'Upstream image-size rejection fails over instead of blaming user content',
+    input: {
+      statusCode: 400,
+      bodyJson: { error: { type: 'invalid_request_error', message: 'Invalid image size' } },
+    },
+    category: 'retryable_upstream_capability',
+    shouldFailover: true,
+  },
+  {
     name: 'Disabled upstream channel fails over',
     input: {
       statusCode: 400,
