@@ -50,38 +50,6 @@ const sessionTtlMs = 1000 * 60 * 60 * 24 * 7;
 const cookieName = 'yali_admin_session';
 requireDatabaseUrl('admin_routes');
 
-const providerSchema = z.object({
-  providerId: z.string().min(1),
-  name: z.string().optional(),
-  source: z.enum(['admin_managed', 'user_supplied']),
-  protocol: z.enum([
-    'openai_images',
-    'openai_responses',
-    'openai_chat',
-    'gemini_generate_content',
-    'custom_async_media',
-  ]).optional(),
-  baseUrl: z.string().url(),
-  apiKey: z.string().optional(),
-  modelAllowlist: z.array(z.string()).optional(),
-  healthState: z.enum(['healthy', 'cooling', 'degraded', 'disabled']).optional(),
-  supportsImage: z.boolean().optional(),
-  supportsVideo: z.boolean().optional(),
-  capability: z.object({
-    supportsSync: z.boolean().optional(),
-    supportsAsync: z.boolean().optional(),
-    supportsImageGeneration: z.boolean().optional(),
-    supportsImageEdit: z.boolean().optional(),
-    supportsVideoGeneration: z.boolean().optional(),
-    supportsReferenceImages: z.boolean().optional(),
-  }).optional(),
-  passthrough: z.object({
-    injectHeaders: z.record(z.string(), z.string()).optional(),
-    injectBodyFields: z.record(z.string(), z.unknown()).optional(),
-  }).optional(),
-  metadata: z.record(z.string(), z.unknown()).optional(),
-});
-
 const loginSchema = z.object({
   username: z.string().min(1),
   password: z.string().min(1),
@@ -1894,13 +1862,6 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     }
   });
 
-  app.get('/v1/admin/providers', async (request, reply) => {
-    requireAdmin(request, reply);
-    return {
-      providers: providerRegistry.list(),
-    };
-  });
-
   app.get('/v1/admin/catalog', async (request, reply) => {
     requireAdmin(request, reply);
     return adminConsoleCatalogStore.refreshAsync();
@@ -2823,40 +2784,6 @@ export async function registerAdminRoutes(app: FastifyInstance) {
       await operationalRepository.clearOperationalRollups({ metricFamily: 'channel_performance' });
     }
     return saved;
-  });
-
-  app.put('/v1/admin/providers', async (request, reply) => {
-    requireAdmin(request, reply);
-    const body = z.object({
-      providers: z.array(providerSchema),
-    }).parse(request.body);
-    await providerRegistry.replaceAllAsync(body.providers as ProviderConfig[]);
-    return {
-      success: true,
-      providers: await providerRegistry.refreshAsync(),
-    };
-  });
-
-  app.post('/v1/admin/providers', async (request, reply) => {
-    requireAdmin(request, reply);
-    const provider = providerSchema.parse(request.body) as ProviderConfig;
-    const current = await providerRegistry.refreshAsync();
-    const next = current.filter((item) => item.providerId !== provider.providerId);
-    next.push(provider);
-    await providerRegistry.replaceAllAsync(next);
-    return {
-      success: true,
-      provider,
-    };
-  });
-
-  app.delete('/v1/admin/providers/:providerId', async (request, reply) => {
-    requireAdmin(request, reply);
-    const params = z.object({ providerId: z.string().min(1) }).parse(request.params);
-    const current = await providerRegistry.refreshAsync();
-    const next = current.filter((item) => item.providerId !== params.providerId);
-    await providerRegistry.replaceAllAsync(next);
-    return { success: true };
   });
 
   app.get('/v1/admin/overview', async (request, reply) => {
