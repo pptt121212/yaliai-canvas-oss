@@ -725,6 +725,10 @@ export interface AsyncOperationalRepository {
   upsertTask(record: TaskMasterRecord): Promise<TaskMasterRecord>;
   getTask(taskId: string): Promise<TaskMasterRecord | null>;
   listTasks(limit: number): Promise<TaskMasterRecord[]>;
+  listActiveImageTasks(input: {
+    limit: number;
+    updatedAfter?: number;
+  }): Promise<TaskMasterRecord[]>;
   listTasksForBilling(input: {
     taskIds: string[];
     requestIds: string[];

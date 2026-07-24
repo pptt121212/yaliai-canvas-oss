@@ -773,6 +773,7 @@ async function ensureOperationalTables(pool: Pool, schema: string) {
     await pool.query(`create index if not exists ${schema}_task_master_channel_upstream_created_idx on ${schema}.task_master (channel_id, upstream_id, created_at desc)`);
     await pool.query(`create index if not exists ${schema}_task_master_created_channel_upstream_idx on ${schema}.task_master (created_at desc, channel_id, upstream_id) where coalesce(request_payload ->> '_provider_source', '') <> 'user_supplied'`);
     await pool.query(`create index if not exists ${schema}_task_master_image_created_idx on ${schema}.task_master (created_at desc, status) where coalesce(channel_id, '') in ('image_generation', 'channel_image_generation') and coalesce(request_payload ->> '_provider_source', '') <> 'user_supplied'`);
+    await pool.query(`create index if not exists ${schema}_task_master_active_image_updated_idx on ${schema}.task_master (updated_at) where coalesce(channel_id, '') in ('image_generation', 'channel_image_generation') and status in ('queued', 'running')`);
     await pool.query(`create index if not exists ${schema}_tenant_finance_ledger_created_at_idx on ${schema}.tenant_finance_ledger (created_at desc)`);
     await pool.query(`create index if not exists ${schema}_tenant_finance_ledger_created_id_idx on ${schema}.tenant_finance_ledger (created_at desc, id desc)`);
     await pool.query(`create index if not exists ${schema}_tenant_finance_ledger_tenant_created_idx on ${schema}.tenant_finance_ledger (tenant_id, created_at desc)`);
@@ -3055,6 +3056,51 @@ export function createPostgresOperationalRepository(
       const result = await pool.query(
         `select * from ${schema}.task_master order by created_at desc limit $1`,
         [limit],
+      );
+      return result.rows.map((row) => ({
+        taskId: row.task_id,
+        requestId: row.request_id,
+        tenantId: row.tenant_id,
+        apiKeyId: row.api_key_id,
+        channelId: row.channel_id,
+        upstreamId: row.upstream_id ?? undefined,
+        operation: row.operation,
+        status: row.status,
+        providerId: row.provider_id ?? undefined,
+        providerSource: row.request_payload?._provider_source ?? undefined,
+        providerBaseUrl: row.request_payload?._provider_base_url ?? undefined,
+        model: row.model,
+        promptPreview: row.prompt_preview,
+        createdAt: Number(row.created_at),
+        updatedAt: Number(row.updated_at),
+        completedAt: row.completed_at ? Number(row.completed_at) : undefined,
+        requestPayload: row.request_payload || {},
+        responsePayload: row.response_payload || null,
+        errorPayload: row.error_payload || null,
+        billedCredits: row.billed_credits ?? undefined,
+      } satisfies TaskMasterRecord));
+    },
+    async listActiveImageTasks(input) {
+      await ensureOperationalTables(pool, schema);
+      const limit = Math.max(1, Math.min(10_000, Math.floor(Number(input.limit || 0))));
+      const conditions = [
+        "coalesce(channel_id, '') in ('image_generation', 'channel_image_generation')",
+        "status in ('queued', 'running')",
+      ];
+      const params: number[] = [];
+      if (Number.isFinite(input.updatedAfter) && Number(input.updatedAfter) > 0) {
+        params.push(Number(input.updatedAfter));
+        conditions.push(`updated_at >= $${params.length}`);
+      }
+      params.push(limit);
+      const result = await pool.query(
+        `
+          select * from ${schema}.task_master
+          where ${conditions.join(' and ')}
+          order by updated_at asc
+          limit $${params.length}
+        `,
+        params,
       );
       return result.rows.map((row) => ({
         taskId: row.task_id,

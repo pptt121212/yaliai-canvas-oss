@@ -121,6 +121,12 @@ const port = Number(process.env.PORT || 4010);
 const host = process.env.HOST || '0.0.0.0';
 const gracefulShutdownTimeoutMs = Math.max(30_000, Number(process.env.GRACEFUL_SHUTDOWN_TIMEOUT_MS || 11 * 60_000));
 const imageTaskHotTtlSeconds = 60 * 15;
+const asyncTaskRecoveryStaleMs = Math.max(
+  20 * 60_000,
+  Number(process.env.ASYNC_IMAGE_TASK_RECOVERY_STALE_MS || 0),
+);
+const asyncTaskHeartbeatMs = Math.max(30_000, Math.min(5 * 60_000, Math.floor(asyncTaskRecoveryStaleMs / 3)));
+const asyncTaskRecoveryBatchSize = Math.max(1, Math.min(10_000, Number(process.env.ASYNC_IMAGE_TASK_RECOVERY_BATCH_SIZE || 1_000)));
 const configuredImageTaskQueryTtlSeconds = Math.max(
   60 * 15,
   Math.floor(Number(process.env.ASYNC_IMAGE_TASK_TTL_SECONDS || 60 * 720)),
@@ -484,12 +490,21 @@ async function cleanupStaleMultipartInputSpools() {
 
 async function cleanupStaleAsyncTaskAssets() {
   await fs.mkdir(asyncTaskAssetRoot, { recursive: true });
-  const cutoff = Date.now() - imageTaskHotTtlSeconds * 1000;
+  // A task asset may still be needed by a queued task after a process restart.
+  // Only remove directories with no surviving task record after normal task
+  // retention; terminal task assets are removed immediately by their worker.
+  const cutoff = Date.now() - effectiveTaskRecordRetentionMs();
   const entries = await fs.readdir(asyncTaskAssetRoot, { withFileTypes: true });
   await Promise.all(entries.filter((entry) => entry.isDirectory()).map(async (entry) => {
     const directory = path.join(asyncTaskAssetRoot, entry.name);
     const stat = await fs.stat(directory).catch(() => undefined);
-    if (stat && stat.mtimeMs < cutoff) {
+    if (!stat) return;
+    const task = await operationalRepository.getTask(entry.name).catch(() => null);
+    if (task && (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled')) {
+      await fs.rm(directory, { recursive: true, force: true });
+      return;
+    }
+    if (!task && stat.mtimeMs < cutoff) {
       await fs.rm(directory, { recursive: true, force: true });
     }
   }));
@@ -1240,6 +1255,18 @@ type AsyncQueuedTaskInternalState = {
   enqueuedAt: number;
   attemptCount: number;
   assetDirectory?: string;
+  imageAssets?: AsyncTaskImageAsset[];
+};
+
+type DurableAsyncTaskResume = {
+  version: 1;
+  resumable: boolean;
+  payload: z.infer<typeof openAIImagesSchema>;
+  accessContext: RequestAccessContext;
+  requestHeaders: Record<string, string>;
+  enqueuedAt: number;
+  attemptCount: number;
+  queueExpiresAt?: number;
   imageAssets?: AsyncTaskImageAsset[];
 };
 
@@ -2080,6 +2107,139 @@ function effectiveBillingLedgerRetentionMs() {
   return Math.max(24 * 60 * 60 * 1000, Math.floor(configuredDays * 24 * 60 * 60 * 1000));
 }
 
+async function asyncTaskAssetsExist(internal: AsyncQueuedTaskInternalState) {
+  if (!payloadHasAsyncTaskImageAssets(internal.payload)) {
+    return true;
+  }
+  const directory = internal.assetDirectory;
+  if (!directory || !internal.imageAssets?.length) {
+    return false;
+  }
+  const sources = asyncTaskImageSourcesForPayload({
+    assetDirectory: directory,
+    imageAssets: internal.imageAssets,
+    payload: internal.payload,
+  });
+  if (!sources?.length) {
+    return false;
+  }
+  const checks = await Promise.all(sources.map((source) => fs.access(source.filePath).then(() => true).catch(() => false)));
+  return checks.every(Boolean);
+}
+
+async function recoverDurableAsyncImageTasks() {
+  const records = await operationalRepository.listActiveImageTasks({
+    limit: asyncTaskRecoveryBatchSize,
+  });
+  const now = Date.now();
+  for (const record of records) {
+    // Never overwrite an active Redis task. The database entry is a durable
+    // recovery source only, and may be a few milliseconds behind a worker
+    // that has just changed the task from queued to running.
+    const hotTask = await getImageTaskState(record.taskId);
+    if (hotTask && (hotTask.status === 'queued' || hotTask.status === 'running')) {
+      continue;
+    }
+    const task = imageTaskStateFromDurableAsyncRecord(record);
+    if (!task) {
+      if (record.status === 'running' && now - Number(record.updatedAt || record.createdAt || now) >= asyncTaskRecoveryStaleMs) {
+        try {
+          await operationalRepository.upsertTask({
+            ...record,
+            status: 'failed',
+            updatedAt: now,
+            completedAt: now,
+            errorPayload: {
+              error: 'async_worker_recovery_timeout',
+              message: 'The image worker stopped before a final result was recorded. Please submit the request again.',
+              status_code: 503,
+              failure_category: 'retryable_internal_error',
+            },
+          });
+          const legacyAssetDirectory = path.join(asyncTaskAssetRoot, sanitizeFileSegment(record.taskId));
+          await fs.rm(legacyAssetDirectory, { recursive: true, force: true });
+        } catch (error) {
+          requestLogWarn('async_task_legacy_recovery_failed', {
+            taskId: record.taskId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      continue;
+    }
+    const internal = readQueuedTaskInternalState(task);
+    if (!internal) {
+      continue;
+    }
+    try {
+      if (task.status === 'queued') {
+        if (Number(task.queue_expires_at || 0) > 0 && Number(task.queue_expires_at) <= now) {
+          await failQueuedImageTask({
+            task,
+            requestHeaders: internal.requestHeaders,
+            payload: internal.payload,
+            accessContext: internal.accessContext,
+            operation: task.operation,
+            errorPayload: {
+              error: 'async_queue_timeout',
+              message: 'The async image task waited too long in queue before execution.',
+              status_code: 429,
+              failure_category: 'retryable_overloaded',
+            },
+          });
+          continue;
+        }
+        if (!await asyncTaskAssetsExist(internal)) {
+          await failQueuedImageTask({
+            task,
+            requestHeaders: internal.requestHeaders,
+            payload: internal.payload,
+            accessContext: internal.accessContext,
+            operation: task.operation,
+            errorPayload: {
+              error: 'async_task_assets_missing',
+              message: 'Async task reference image assets are unavailable after recovery.',
+              status_code: 500,
+              failure_category: 'retryable_internal_error',
+            },
+          });
+          continue;
+        }
+        await setImageTaskState(task.task_id, task, imageTaskHotTtlSeconds);
+        continue;
+      }
+
+      // A running task may have already reached its upstream before a forced
+      // process exit. Replaying it would risk a duplicate image and charge.
+      if (now - Number(record.updatedAt || record.createdAt || now) >= asyncTaskRecoveryStaleMs) {
+        task.status = 'failed';
+        task.error = {
+          error: 'async_worker_recovery_timeout',
+          message: 'The image worker stopped before a final result was recorded. Please submit the request again.',
+          status_code: 503,
+          failure_category: 'retryable_internal_error',
+        };
+        task.updated_at = now;
+        await setImageTaskState(task.task_id, task, imageTaskHotTtlSeconds);
+        await persistAsyncTaskLifecycle({
+          task,
+          accessContext: internal.accessContext,
+          payload: internal.payload,
+          errorPayload: task.error as Record<string, unknown>,
+        });
+        if (internal.assetDirectory) {
+          await fs.rm(internal.assetDirectory, { recursive: true, force: true });
+        }
+      }
+    } catch (error) {
+      requestLogWarn('async_task_durable_recovery_failed', {
+        taskId: record.taskId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+}
+
 async function pruneShortTermOperationalData() {
   const pruneOperational = typeof operationalRepository.pruneOperationalRetention === 'function'
     ? operationalRepository.pruneOperationalRetention({
@@ -2094,6 +2254,9 @@ async function pruneShortTermOperationalData() {
     pruneGeneratedImageFiles(effectiveGeneratedImageRetentionMs()),
     pruneCanvasReferenceAssetFiles(effectiveCanvasReferenceAssetRetentionMs()),
   ]);
+  await recoverDurableAsyncImageTasks().catch((error) => requestLogWarn('async_task_durable_recovery_maintenance_failed', error));
+  await cleanupStaleMultipartInputSpools().catch((error) => requestLogWarn('multipart_input_spool_maintenance_cleanup_failed', error));
+  await cleanupStaleAsyncTaskAssets().catch((error) => requestLogWarn('async_task_asset_maintenance_cleanup_failed', error));
 }
 
 function scheduleOperationalMaintenance() {
@@ -4117,6 +4280,176 @@ function writeQueuedTaskInternalState(task: ImageGatewayTaskState, state: AsyncQ
   };
 }
 
+function deriveAsyncTaskAssetDirectory(taskId: string, imageAssets: AsyncTaskImageAsset[] | undefined) {
+  if (!imageAssets?.length) {
+    return undefined;
+  }
+  const safeTaskId = sanitizeFileSegment(taskId);
+  return safeTaskId === taskId ? path.join(asyncTaskAssetRoot, safeTaskId) : undefined;
+}
+
+function isDurablyResumableAsyncPayload(payload: z.infer<typeof openAIImagesSchema>) {
+  const values = payload.image ? (Array.isArray(payload.image) ? payload.image : [payload.image]) : [];
+  return values.every((value) => {
+    const normalized = String(value || '').trim();
+    return !normalized.startsWith('data:') && !isLikelyRawBase64(normalized);
+  });
+}
+
+function sanitizeAsyncTaskPayloadForPersistence(payload: z.infer<typeof openAIImagesSchema>) {
+  const {
+    user_api_key: _userApiKey,
+    ...safePayload
+  } = payload;
+  return compactSuccessfulImagePayloadForStorage(safePayload) as z.infer<typeof openAIImagesSchema>;
+}
+
+function buildDurableAsyncTaskResume(input: {
+  task: ImageGatewayTaskState;
+  internal: AsyncQueuedTaskInternalState;
+}): DurableAsyncTaskResume {
+  return {
+    version: 1,
+    resumable: input.internal.accessContext.authMode !== 'user_supplied'
+      && isDurablyResumableAsyncPayload(input.internal.payload),
+    payload: sanitizeAsyncTaskPayloadForPersistence(input.internal.payload),
+    accessContext: input.internal.accessContext,
+    requestHeaders: input.internal.requestHeaders,
+    enqueuedAt: input.internal.enqueuedAt,
+    attemptCount: input.internal.attemptCount,
+    queueExpiresAt: input.task.queue_expires_at,
+    imageAssets: input.internal.imageAssets || [],
+  };
+}
+
+function readDurableAsyncTaskResume(record: TaskMasterRecord): DurableAsyncTaskResume | null {
+  const raw = record.requestPayload?._async_resume;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return null;
+  }
+  const resume = raw as Partial<DurableAsyncTaskResume>;
+  if (resume.version !== 1 || !resume.payload || typeof resume.payload !== 'object' || Array.isArray(resume.payload)) {
+    return null;
+  }
+  if (!resume.accessContext || typeof resume.accessContext !== 'object' || Array.isArray(resume.accessContext)) {
+    return null;
+  }
+  const rawHeaders = resume.requestHeaders && typeof resume.requestHeaders === 'object' && !Array.isArray(resume.requestHeaders)
+    ? resume.requestHeaders as Record<string, unknown>
+    : {};
+  const rawAssets: unknown[] = Array.isArray(resume.imageAssets) ? resume.imageAssets as unknown[] : [];
+  const imageAssets = rawAssets
+    .filter((asset): asset is Record<string, unknown> => Boolean(asset) && typeof asset === 'object' && !Array.isArray(asset))
+    .map((asset) => ({
+      sourceRef: String(asset.sourceRef || '').trim(),
+      assetName: String(asset.assetName || '').trim(),
+      fileName: normalizeIncomingMultipartImageFileName(asset.fileName),
+      mimeType: String(asset.mimeType || '').trim(),
+      extension: sanitizeFileSegment(String(asset.extension || '').trim()),
+      bytes: Math.max(0, Number(asset.bytes || 0)),
+    }))
+    .filter((asset) => (
+      asset.sourceRef.startsWith(asyncTaskImageAssetPrefix)
+      && Boolean(asset.assetName)
+      && Boolean(asset.fileName)
+      && Boolean(asset.mimeType)
+      && Boolean(asset.extension)
+      && asset.bytes > 0
+    ));
+  return {
+    version: 1,
+    resumable: resume.resumable === true,
+    payload: resume.payload as z.infer<typeof openAIImagesSchema>,
+    accessContext: resume.accessContext as RequestAccessContext,
+    requestHeaders: Object.fromEntries(Object.entries(rawHeaders).map(([key, value]) => [key, String(value || '').trim()])),
+    enqueuedAt: Math.max(0, Number(resume.enqueuedAt || record.createdAt || Date.now())),
+    attemptCount: Math.max(0, Number(resume.attemptCount || 0)),
+    queueExpiresAt: Number(resume.queueExpiresAt || 0) || undefined,
+    imageAssets,
+  };
+}
+
+function imageTaskStateFromDurableAsyncRecord(record: TaskMasterRecord) {
+  const resume = readDurableAsyncTaskResume(record);
+  if (!resume || !resume.resumable || (record.status !== 'queued' && record.status !== 'running')) {
+    return null;
+  }
+  const task: ImageGatewayTaskState = {
+    task_id: record.taskId,
+    operation: record.operation,
+    provider_id: record.providerId || record.upstreamId || '',
+    status: record.status,
+    created_at: Number(record.createdAt || Date.now()),
+    updated_at: Number(record.updatedAt || record.createdAt || Date.now()),
+    started_at: record.status === 'running' ? Number(record.updatedAt || record.createdAt || Date.now()) : undefined,
+    queue_expires_at: resume.queueExpiresAt,
+    request_plan: (record.requestPayload?.requestPlan || {}) as Record<string, unknown>,
+    result: null,
+    error: null,
+  };
+  writeQueuedTaskInternalState(task, {
+    payload: resume.payload,
+    accessContext: resume.accessContext,
+    requestHeaders: resume.requestHeaders,
+    enqueuedAt: resume.enqueuedAt,
+    attemptCount: resume.attemptCount,
+    assetDirectory: deriveAsyncTaskAssetDirectory(record.taskId, resume.imageAssets),
+    imageAssets: resume.imageAssets,
+  });
+  return task;
+}
+
+function buildAsyncTaskRequestPayload(task: ImageGatewayTaskState, internal: AsyncQueuedTaskInternalState) {
+  return {
+    payload: compactSuccessfulImagePayloadForStorage(internal.payload),
+    requestPlan: task.request_plan,
+    _async_resume: buildDurableAsyncTaskResume({ task, internal }),
+  };
+}
+
+async function persistAsyncTaskLifecycle(input: {
+  task: ImageGatewayTaskState;
+  accessContext: RequestAccessContext;
+  payload: z.infer<typeof openAIImagesSchema>;
+  providerBaseUrl?: string;
+  responsePayload?: Record<string, unknown> | null;
+  errorPayload?: Record<string, unknown> | null;
+}) {
+  const internal = readQueuedTaskInternalState(input.task);
+  const requestPayload = internal
+    ? buildAsyncTaskRequestPayload(input.task, internal)
+    : {
+        payload: sanitizeAsyncTaskPayloadForPersistence(input.payload),
+        requestPlan: input.task.request_plan,
+      };
+  return upsertTaskRecord({
+    taskId: input.task.task_id,
+    requestId: input.task.task_id,
+    tenantId: input.accessContext.tenantId,
+    apiKeyId: input.accessContext.apiKeyId,
+    channelId: imageChannelId,
+    upstreamId: input.task.provider_id,
+    operation: input.task.operation,
+    status: input.task.status,
+    providerId: input.task.provider_id,
+    providerBaseUrl: input.providerBaseUrl,
+    model: input.payload.model,
+    promptPreview: input.payload.prompt.slice(0, 120),
+    createdAt: input.task.created_at,
+    updatedAt: input.task.updated_at,
+    completedAt: input.task.status === 'completed' || input.task.status === 'failed' || input.task.status === 'cancelled'
+      ? input.task.updated_at
+      : undefined,
+    requestPayload,
+    responsePayload: input.responsePayload
+      ? compactSuccessfulImagePayloadForStorage(input.responsePayload) as Record<string, unknown>
+      : null,
+    errorPayload: input.errorPayload
+      ? compactSuccessfulImagePayloadForStorage(input.errorPayload) as Record<string, unknown>
+      : null,
+  });
+}
+
 function sanitizeImageTaskForResponse(task: ImageGatewayTaskState) {
   const {
     internal: _internal,
@@ -5175,22 +5508,10 @@ async function failQueuedImageTask(input: {
   input.task.error = input.errorPayload;
   input.task.updated_at = Date.now();
   await setImageTaskState(input.task.task_id, input.task, imageTaskHotTtlSeconds);
-  void upsertTaskRecord({
-    taskId: input.task.task_id,
-    requestId: input.task.task_id,
-    tenantId: input.accessContext.tenantId,
-    apiKeyId: input.accessContext.apiKeyId,
-    channelId: imageChannelId,
-    upstreamId: input.task.provider_id,
-    operation: input.operation,
-    status: 'failed',
-    providerId: input.task.provider_id,
-    model: input.payload.model,
-    promptPreview: input.payload.prompt.slice(0, 120),
-    createdAt: input.task.created_at,
-    updatedAt: input.task.updated_at,
-    completedAt: input.task.updated_at,
-    requestPayload: { payload: input.payload, operation: input.operation },
+  await persistAsyncTaskLifecycle({
+    task: input.task,
+    accessContext: input.accessContext,
+    payload: input.payload,
     responsePayload: {
       resolutionAudit: await buildImageResolutionAuditRecord({
         requestPayload: {
@@ -7728,6 +8049,7 @@ async function createImageGatewayTask(input: {
     throw error;
   }
   let persistedAssets: Awaited<ReturnType<typeof persistAsyncTaskMultipartAssets>> | undefined;
+  let queuedRecord: ImageGatewayTaskState | undefined;
   try {
     const queueConfig = getAsyncImageQueueRuntimeConfig();
     const queueState = await inspectAsyncQueueState(input.accessContext);
@@ -7752,6 +8074,7 @@ async function createImageGatewayTask(input: {
       result: null,
       error: null,
     };
+    queuedRecord = record;
     writeQueuedTaskInternalState(record, {
       payload: persistedAssets.payload,
       accessContext: input.accessContext,
@@ -7761,32 +8084,35 @@ async function createImageGatewayTask(input: {
       assetDirectory: persistedAssets.assetDirectory || undefined,
       imageAssets: persistedAssets.imageAssets,
     });
+    // Persist a resumable descriptor before exposing the task to the shared
+    // queue. Redis remains the fast queue, while PostgreSQL covers restarts.
+    await persistAsyncTaskLifecycle({
+      task: record,
+      accessContext: input.accessContext,
+      payload: persistedAssets.payload,
+      providerBaseUrl: input.providerBaseUrl,
+    });
     // Keep the admission reservation until this task is visible to every PM2 worker.
     await setImageTaskState(taskId, record, imageTaskHotTtlSeconds);
-    void upsertTaskRecord({
-      taskId,
-      requestId: taskId,
-      tenantId: input.accessContext.tenantId,
-      apiKeyId: input.accessContext.apiKeyId,
-      channelId: 'image_generation',
-      upstreamId: input.providerId,
-      operation: input.operation,
-      status: 'queued',
-      providerId: input.providerId,
-      providerBaseUrl: input.providerBaseUrl,
-      model: persistedAssets.payload.model,
-      promptPreview: persistedAssets.payload.prompt.slice(0, 120),
-      createdAt: now,
-      updatedAt: now,
-      requestPayload: {
-        payload: compactSuccessfulImagePayloadForStorage(persistedAssets.payload),
-        requestPlan: input.requestPlan,
-      },
-      responsePayload: null,
-      errorPayload: null,
-    });
     return record;
   } catch (error) {
+    if (queuedRecord && persistedAssets) {
+      queuedRecord.status = 'failed';
+      queuedRecord.error = {
+        error: 'async_task_enqueue_failed',
+        message: 'The async image task could not be made available to a worker.',
+        status_code: 503,
+        failure_category: 'retryable_internal_error',
+      };
+      queuedRecord.updated_at = Date.now();
+      await persistAsyncTaskLifecycle({
+        task: queuedRecord,
+        accessContext: input.accessContext,
+        payload: persistedAssets.payload,
+        providerBaseUrl: input.providerBaseUrl,
+        errorPayload: queuedRecord.error as Record<string, unknown>,
+      }).catch((persistError) => requestLogWarn('async_task_enqueue_failure_persist_failed', persistError));
+    }
     if (persistedAssets?.assetDirectory) {
       await fs.rm(persistedAssets.assetDirectory, { recursive: true, force: true }).catch((cleanupError) => {
         requestLogWarn('async_task_asset_admission_cleanup_failed', cleanupError);
@@ -7820,7 +8146,27 @@ async function runImageGatewayTask(
   }
   await setImageTaskState(taskId, task, imageTaskHotTtlSeconds);
 
+  const taskHeartbeat = setInterval(() => {
+    task.updated_at = Date.now();
+    void setImageTaskState(taskId, task, imageTaskHotTtlSeconds).catch((error) => {
+      requestLogWarn('async_task_heartbeat_hot_state_failed', { taskId, error });
+    });
+    void persistAsyncTaskLifecycle({
+      task,
+      accessContext,
+      payload,
+    }).catch((error) => {
+      requestLogWarn('async_task_heartbeat_persistence_failed', { taskId, error });
+    });
+  }, asyncTaskHeartbeatMs);
+  taskHeartbeat.unref?.();
+
   try {
+    await persistAsyncTaskLifecycle({
+      task,
+      accessContext,
+      payload,
+    });
     const asyncMultipartSources = asyncTaskImageSourcesForPayload({
       assetDirectory: internal?.assetDirectory,
       imageAssets: internal?.imageAssets,
@@ -7846,6 +8192,12 @@ async function runImageGatewayTask(
       };
       task.updated_at = Date.now();
       await setImageTaskState(taskId, task, imageTaskHotTtlSeconds);
+      await persistAsyncTaskLifecycle({
+        task,
+        accessContext,
+        payload,
+        errorPayload: task.error as Record<string, unknown>,
+      });
       void finalizeAsyncSubmissionTrace({
         source: 'tenant_runtime_async_complete',
         scope: 'full_chain',
@@ -7920,6 +8272,14 @@ async function runImageGatewayTask(
     task.error = downstreamError;
     task.updated_at = Date.now();
     await setImageTaskState(taskId, task, imageTaskHotTtlSeconds);
+    await persistAsyncTaskLifecycle({
+      task,
+      accessContext,
+      payload: result.payload,
+      providerBaseUrl: result.resolved.provider.baseUrl,
+      responsePayload: task.result as Record<string, unknown>,
+      errorPayload: task.error && typeof task.error === 'object' ? task.error as Record<string, unknown> : null,
+    });
     if (result.response.ok) {
       void providerRegistry.reportAttempt({
         providerId: result.resolved.provider.providerId,
@@ -8036,22 +8396,10 @@ async function runImageGatewayTask(
     task.error = error instanceof Error ? error.message : 'unknown_error';
     task.updated_at = Date.now();
     await setImageTaskState(taskId, task, imageTaskHotTtlSeconds);
-    void upsertTaskRecord({
-      taskId,
-      requestId: taskId,
-      tenantId: accessContext.tenantId,
-      apiKeyId: accessContext.apiKeyId,
-      channelId: 'image_generation',
-      upstreamId: task.provider_id,
-      operation,
-      status: 'failed',
-      providerId: task.provider_id,
-      model: payload.model,
-      promptPreview: payload.prompt.slice(0, 120),
-      createdAt: task.created_at,
-      updatedAt: task.updated_at,
-      completedAt: task.updated_at,
-      requestPayload: { payload, operation },
+    await persistAsyncTaskLifecycle({
+      task,
+      accessContext,
+      payload,
       responsePayload: {
         resolutionAudit: await buildImageResolutionAuditRecord({
           requestPayload: {
@@ -8092,6 +8440,7 @@ async function runImageGatewayTask(
       tags: ['runtime', 'async', 'completion'],
     });
   } finally {
+    clearInterval(taskHeartbeat);
     if (internal?.assetDirectory) {
       await fs.rm(internal.assetDirectory, { recursive: true, force: true }).catch((error) => {
         requestLogWarn('async_task_asset_cleanup_failed', error);
@@ -10622,6 +10971,9 @@ await initializeAdminConsoleCatalogStore();
 await initializeAdminControlPlaneStore();
 await cleanupStaleMultipartInputSpools().catch((error) => {
   requestLogWarn('multipart_input_spool_startup_cleanup_failed', error);
+});
+await recoverDurableAsyncImageTasks().catch((error) => {
+  requestLogWarn('async_task_durable_startup_recovery_failed', error);
 });
 await cleanupStaleAsyncTaskAssets().catch((error) => {
   requestLogWarn('async_task_asset_startup_cleanup_failed', error);
