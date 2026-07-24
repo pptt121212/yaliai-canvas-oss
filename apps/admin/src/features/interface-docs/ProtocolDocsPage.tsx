@@ -208,7 +208,7 @@ Content-Type: application/json
       '若同时传入 async=true 与 stream=true，以 async=true 为准，首次响应固定返回任务回执而不是 SSE。',
       'async=true 时，首次响应返回 HTTP 202 与 task_id / status / query_path / queue_position / queue_expires_at；最终图像结果需通过任务查询接口获取。',
       '异步任务只会由网关在后台执行一次；轮询查询不会再次提交或再次计费。',
-      '异步任务查询接口支持：GET /v1/images/generations/:taskId、GET /v1/images/edits/:taskId、GET /v1/image/tasks/:taskId。任务结果固定放在 result.body.data，不会平铺到查询响应顶层。',
+      '异步任务查询必须与提交操作匹配：文生图使用 GET /v1/images/generations/:taskId；图生图使用 GET /v1/images/edits/:taskId；两类任务都可使用 GET /v1/image/tasks/:taskId。generations 与 edits 查询路径不能交叉使用。任务结果固定放在 result.body.data，不会平铺到查询响应顶层。',
       '当前对外查询窗口为至少 720 分钟，并与后台“生成图片保留时间”保持一致；过期返回 404 task_expired。不要把任务 ID 公开到日志、前端地址或第三方页面。',
       'callback_url 当前只作为兼容字段透传给上游；网关自身不会因为传了 callback_url 就主动回调下游。',
       '当 provider_source=user_supplied 时，网关会改用下游请求里提供的上游地址与密钥，不再走平台租户鉴权；该能力是否允许由后台 routing.allowUserSuppliedKey 控制。',
@@ -490,8 +490,13 @@ Content-Type: application/json
         key: 'images-downstream-async-query',
         title: '下游异步查询：最终结果在 result.body',
         requestLabel: '下游查询网关',
-        requestBody: `GET /v1/images/generations/imgtask_xxx
+        requestBody: `# 文生图任务
+GET /v1/images/generations/imgtask_xxx
+
+# 图生图任务
 GET /v1/images/edits/imgtask_xxx
+
+# 文生图和图生图均可使用的通用查询
 GET /v1/image/tasks/imgtask_xxx`,
         responseLabel: '网关返回给下游',
         responseBody: `{
@@ -704,13 +709,18 @@ Content-Type: application/json
 
         <Col xs={24} xl={12}>
           <Card size="small" title="3. 轮询任务状态">
-            <pre className="json-block">{`GET /v1/images/generations/imgtask_mrx9pug8_r13o7s
-Authorization: Bearer $YALIAI_API_KEY
+            <pre className="json-block">{`# 文生图任务
+GET /v1/images/generations/{task_id}
 
-# 图生图可使用：GET /v1/images/edits/{task_id}
-# 通用查询可使用：GET /v1/image/tasks/{task_id}`}</pre>
+# 图生图任务
+GET /v1/images/edits/{task_id}
+
+# 通用查询，文生图和图生图均可使用
+GET /v1/image/tasks/{task_id}
+
+Authorization: Bearer $YALIAI_API_KEY`}</pre>
             <Paragraph type="secondary" style={{ marginBottom: 0 }}>
-              建议收到 202 后等待 1–2 秒再首次查询；queued 或 running 时使用指数退避轮询（例如 2、3、5、8、10 秒），最大间隔建议不超过 10 秒。queue_position 是提交瞬间的估算值，不是执行顺序承诺。
+              文生图与图生图的操作专用查询路径不能混用；也可以始终使用通用查询路径。建议收到 202 后等待 1–2 秒再首次查询；queued 或 running 时使用指数退避轮询（例如 2、3、5、8、10 秒），最大间隔建议不超过 10 秒。queue_position 是提交瞬间的估算值，不是执行顺序承诺。
             </Paragraph>
           </Card>
         </Col>
