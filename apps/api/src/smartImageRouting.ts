@@ -1188,30 +1188,18 @@ export function classifyUpstreamFailure(input: {
       affectsHealth: true,
     };
   }
+  // The upstream's 4xx vocabulary is not a trustworthy statement about the
+  // downstream request. A non-safety 400/410/415/422 commonly means that one
+  // selected line rejects an image transport, prompt shape, output option, or
+  // size that another configured line accepts. The public gateway has already
+  // validated its own request contract before this point, so treat these as a
+  // health/capability failure and continue through the eligible route pool.
   if ([400, 410, 415, 422].includes(statusCode)) {
-    const userContentSignals = [
-      'safety',
-      'content policy',
-      'policy_violation',
-      'prompt',
-      'reference image',
-      'image input',
-      'invalid image',
-      'unsupported image',
-    ];
-    if (userContentSignals.some((signal) => haystack.includes(signal))) {
-      return {
-        category: 'terminal_user_content',
-        shouldFailover: false,
-        cooldownMs: 0,
-        affectsHealth: false,
-      };
-    }
     return {
-      category: 'terminal_invalid_request',
-      shouldFailover: false,
-      cooldownMs: 0,
-      affectsHealth: false,
+      category: 'retryable_upstream_capability',
+      shouldFailover: true,
+      cooldownMs: 5 * 60_000,
+      affectsHealth: true,
     };
   }
   if (statusCode >= 500) {

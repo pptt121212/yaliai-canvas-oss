@@ -62,6 +62,24 @@ const cases = [
     shouldFailover: true,
   },
   {
+    name: 'Unrecognized upstream 400 fails over as a line capability problem',
+    input: {
+      statusCode: 400,
+      bodyJson: { error: { type: 'invalid_request_error', message: 'request cannot be processed by this endpoint' } },
+    },
+    category: 'retryable_upstream_capability',
+    shouldFailover: true,
+  },
+  {
+    name: 'Upstream prompt-shape 422 fails over unless it is an explicit safety rejection',
+    input: {
+      statusCode: 422,
+      bodyJson: { error: { message: 'prompt format is not accepted by this upstream' } },
+    },
+    category: 'retryable_upstream_capability',
+    shouldFailover: true,
+  },
+  {
     name: 'Disabled upstream channel fails over',
     input: {
       statusCode: 400,
